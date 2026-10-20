@@ -195,7 +195,10 @@ export function helpText() {
       目录不存在时只告警、不阻止启动(project 作用域仍按该路径建立)。
   --store-dir, --store <dir>
       记忆存储目录(与 DSH 插件共用同一份 JSONL + 向量边车);相对路径按当前工作目录解析。
-      默认:环境变量 DSH_MEMORY_STORE_DIR,再退回 ${DEFAULT_STORE_DIR}。
+      默认:环境变量 DSH_MEMORY_STORE_DIR,再退回 ${DEFAULT_STORE_DIR}
+      ⚠️ 默认值只保证「能跑起来」,不保证「就是你 DSH 在用的那个库」。
+        要与 DSH 共用记忆,请显式指向 DSH 插件的 storeDir(可用 DSH 的
+        「设置 → 记忆」查看);否则两边看到的是两份互不相通的记忆。
   -h, --help
       打印本帮助后退出(0)。不启动服务、不探活向量、不创建 store 目录、不加载 MCP SDK。
   -v, --version
@@ -215,12 +218,14 @@ export function helpText() {
   DSH_MEMORY_DEBUG             1 ⇒ 启动失败时额外打印完整调用栈
 
 示例:
-  # 与 DSH 共用默认 store,最省事
+  # 看看能不能看到 DSH 的记忆(不指定 store-dir,先用默认目录试跑)
   ${CLI_NAME}
 
-  # 指定工作区与 store(等号形式等价,在 JSON 配置里少两层引号)
-  ${CLI_NAME} --project D:/dev/my-app --store-dir D:/dev/.dsh-memory-store
-  node src/index.js --store-dir=D:/dev/.dsh-memory-store
+  # 与 DSH 共用记忆(推荐:显式指向 DSH 插件的 storeDir)
+  ${CLI_NAME} --store-dir D:/path/to/dsh-store --project D:/dev/my-app
+
+  # 等号形式等价,在 JSON 配置里少两层引号
+  node src/index.js --store-dir=D:/path/to/dsh-store
 
   # 只要词法检索(不探活、不 spawn llama-server)
   DSH_MEMORY_VECTOR=off ${CLI_NAME}
@@ -262,8 +267,16 @@ function firstMissingAncestor(target) {
   return cur
 }
 
-/** 组装 `--store-dir` 不可用的诊断行。 */
-function storeDirDiagnosis(storeDir, code, message, prefix) {
+/**
+ * 组装 `--store-dir` 不可用的诊断行。
+ *
+ * @param {string} storeDir 目标目录
+ * @param {string} code     错误码
+ * @param {string} message  原始 message
+ * @param {string} prefix   日志前缀
+ * @param {boolean} usedDefault 是否用的是**默认值**(没显式指定)
+ */
+function storeDirDiagnosis(storeDir, code, message, prefix, usedDefault) {
   const missing = firstMissingAncestor(storeDir)
   let reason
   if (missing === null) {
@@ -275,12 +288,29 @@ function storeDirDiagnosis(storeDir, code, message, prefix) {
   } else {
     reason = `父目录不存在:${missing}`
   }
-  return [
+
+  const lines = [
     `${prefix} ❌ 启动失败:记忆存储目录不可用:${storeDir}`,
     `${prefix}    ⇒ 原因:${reason}`,
-    `${prefix}    ⇒ 改 --store-dir(或环境变量 DSH_MEMORY_STORE_DIR)指向一个已存在且可写的目录;默认是 ${DEFAULT_STORE_DIR}`,
-    `${prefix}    原始错误:${code ? `${code} ` : ''}${message.split('\n')[0]}`,
   ]
+
+  // ⚠️ 关键分支:用**默认值**启动时,叫人「改 --store-dir」是废话 —— 用户根本没指定过它,
+  //    而且失败原因往往就是主目录不可写,让他再指一遍默认目录等于原地打转。
+  //    实测(2026-10-20):HOME 设为不可写时,旧文案会说「改 --store-dir 指向…默认是 <同一个目录>」,
+  //    用户照着做只会重复失败。所以这种情况要给出**真正能走通**的指令。
+  if (usedDefault) {
+    lines.push(`${prefix}    ⇒ 你没有指定过它,用的是默认值(用户主目录下的 .dsh-memory-store)。`)
+    lines.push(`${prefix}    ⇒ 请显式指定一个**可写**目录:--store-dir <目录> 或环境变量 DSH_MEMORY_STORE_DIR。`)
+    lines.push(`${prefix}    ⇒ 与 DSH 共用记忆时,应指向 DSH 插件的 storeDir。`)
+    if (code === 'EPERM' || code === 'EACCES') {
+      lines.push(`${prefix}    ⇒ 这台机器上用户主目录(${homedir()})可能本身就不可写;换一个盘符/目录再试。`)
+    }
+  } else {
+    lines.push(`${prefix}    ⇒ 改 --store-dir(或环境变量 DSH_MEMORY_STORE_DIR)指向一个已存在且可写的目录;默认是 ${DEFAULT_STORE_DIR}`)
+  }
+
+  lines.push(`${prefix}    原始错误:${code ? `${code} ` : ''}${message.split('\n')[0]}`)
+  return lines
 }
 
 /**
@@ -320,8 +350,9 @@ export function describeStartupError(error, options = {}) {
   }
 
   // ③ store 目录不可用 —— 部署到别人机器上最常见的一类失败。
+  // `usedDefault` 决定给的指令是否真的可执行:用默认值时不能叫用户"改 --store-dir"再指向默认值。
   if (typeof error?.storeDir === 'string' && error.storeDir !== '') {
-    return finish(storeDirDiagnosis(error.storeDir, code, message, prefix), 1)
+    return finish(storeDirDiagnosis(error.storeDir, code, message, prefix, error.storeDirIsDefault === true), 1)
   }
 
   // ④ 其它:一行可读原因 + 调试开关,不默认倒栈。
@@ -413,8 +444,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   try {
     store = new SharedStore(config.storeDir, { vecIdentity: vector.cfg.modelName + '\t' + vector.cfg.dims })
   } catch (error) {
-    // 打上目标目录,顶层 catch 才能给出"改哪个参数"的诊断(而不是裸栈)。
-    if (error !== null && typeof error === 'object') error.storeDir = config.storeDir
+    // 打上目标目录 + 「这个目录是不是默认值」,顶层 catch 才能给出**真正可执行**的诊断。
+    // 少了 storeDirIsDefault,用户在默认目录不可写时会被告知"改 --store-dir 指向默认目录"—— 原地打转。
+    if (error !== null && typeof error === 'object') {
+      error.storeDir = config.storeDir
+      error.storeDirIsDefault = !args.storeDir && !env.DSH_MEMORY_STORE_DIR
+    }
     throw error
   }
   // ⚠️ ScopeNames 必须传 { root } —— 不传会退化成无锁持久化(并发 claim 会互相覆盖别名)。

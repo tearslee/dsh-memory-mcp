@@ -29,7 +29,7 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 
 | 事实 | 值 | 出处 |
 | --- | --- | --- |
-| Node | `>=22.13.0` | `package.json` `engines` |
+| Node | `>=20.3.0` | `package.json` `engines`;真实下限由 `src/vector.js:366` 的 `AbortSignal.any()` 决定(20.3.0 才提供,20.2 及以前是 `undefined`)。原值 `>=22.13.0` 无源码依据,已下调 |
 | 模块 | `"type": "module"`,纯 ESM,无构建步骤 | `package.json` |
 | 入口 | `src/index.js`(`bin.dsh-memory-mcp`),有 shebang;`--help` / `--version` / 退出码 0/1/2 | `package.json` + `src/index.js` |
 | 唯一外部依赖 | `@modelcontextprotocol/sdk@1.32.1`(精确版本,非 `^`) | `package.json` |
@@ -87,7 +87,8 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 >    两者不一致时服务照常启动,只是读到的是另一份(空的)记忆库。所以 `main()` 在用默认值启动时
 >    会打一条 `ℹ️ 未指定 --store-dir ...` 提示,要求核对与 DSH 是否同一个目录。**别把那条提示删掉**。
 >
-> 另:两个 `acceptance-*.mjs` 里仍写死了作者本机路径(见 §3),换机器跑之前先改。
+> 另:两个 `acceptance-*.mjs` 已**不再**写死任何本机路径 —— 目标库读 `DSH_MEMORY_REAL_STORE`(未设则跳过)、
+> 向量后端读 `DSH_MEMORY_EMBED_EXE`/`MODEL`,仓库入口从脚本自身位置推导(见 §3)。
 
 ### 向量后端(`src/vector.js`)
 
@@ -171,20 +172,32 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 
 | 脚本 | 耗时 | 检查项 | 碰真实 store? | 备注 |
 | --- | --- | --- | --- | --- |
-| `selftest-cli.mjs` | 2.3s | 110 | 否 | CLI 契约:`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析。零副作用(缺依赖场景用 tmpdir 副本模拟) |
+| `selftest-cli.mjs` | 2.3s | 115(Win)/114(POSIX) | 否 | CLI 契约:`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析。零副作用(缺依赖场景用 tmpdir 副本模拟) |
 | `selftest-mcp.mjs` | 1.1s | 40 | 否 | 真起 stdio server(SDK `Client` + `StdioClientTransport`),`--keep` 保留 tmpdir |
 | `selftest.mjs` | 3.5s | 55 | 否 | 真 fork 子进程(`--worker` 自己);开头 `assertNotRealStore()` 硬守卫,命中真实路径直接中止 |
-| `selftest-tools.mjs` | 0.06s | 60 | 否 | 纯内存假 store,只 import `tools.js`/`scope.js` |
+| `selftest-tools.mjs` | 0.06s | 60(Win)/59(POSIX) | 否 | 纯内存假 store,只 import `tools.js`/`scope.js` |
 | `selftest-protocol.mjs` | 0.4s | 18 | 否 | 内存假 store + 临时入口,验证 stdout 纯净性 |
 | `selftest-vector.mjs` | 0.35s | 27 | **只读** | 若 `D:\dev\.dsh-memory-store\global.vec` 存在会**读**它做向量空间比对;不写 |
 | `selftest-vector-e2e.mjs` | 0.6s | 6 | 否 | 用 tmpdir;无可用后端时**直接 `exit(0)` 跳过**(退出码 0 不代表测过) |
 | `acceptance-coexist.mjs` | 0.5s | 4 | 否(临时目录) | spawn `legacy-writer.mjs` 复刻上游无锁写者,量化双向丢数据。**已知 flaky,见下** |
-| `acceptance-real.mjs` | 数秒 | 13 | **是** | 打 `D:/dev/.dsh-memory-store`;结束按 id 删自己造的;**不删它会往 global 留记录** |
-| `acceptance-standalone.mjs` | 最长 ~2min | 11 | **是** | 且 `ENTRY` 写死 `D:/dev/dsh-memory-mcp/src/index.js`,换机器直接挂 |
+| `acceptance-real.mjs` | 数秒 | 18 | 需 `DSH_MEMORY_REAL_STORE` | 打**你指定**的 storeDir(未设环境变量则打印提示 `exit(0)` 跳过)。写入用 `path` 参数并**断言** scope 为 `project:<测试目录>`;结束按 id 删自己造的 |
+| `acceptance-standalone.mjs` | 最长 ~2min | 11 | 需 `DSH_MEMORY_REAL_STORE` | 入口从脚本自身位置推导(`scripts/..`),不再写死;向量后端未配 `DSH_MEMORY_EMBED_EXE`/`MODEL` 时相关小节标「跳过」 |
 
 注意:
 
 - 所有 selftest **可以并发跑**,彼此不共享可变状态。
+- ⚠️ **检查项数在 Windows 与 POSIX 上有 1~2 项差异,这是刻意的**,不是漏数。被 `if (WIN)` 跳过的
+  都是**平台专有语义**:盘符不存在(`Q:` 在 POSIX 上只是普通目录名)、盘符大小写折叠
+  (`c:` 与 `C:` 在 POSIX 上确实是两个不同名字)。**在 POSIX 上断言这些反而是错的。**
+  曾经这三个脚本在真 Linux 上分别红 6 / 10 / 1 项,根因全是"断言写死了 Windows 路径语义",
+  不是 `src/` 的 bug —— 已按「保留断言意图、按平台取样例值」修掉,**别再改回去**。
+- ⚠️ 构造"建不出来的目录"时,POSIX 侧**不要用 `/proc/...`**:实测 `mkdir /proc/xxx` 在该环境里
+  会**挂住不返回**(120s+ 才被 kill)。用「**父路径是普通文件**」→ 必然 `ENOTDIR`,可控且不依赖权限位
+  (CI 若以 root 跑,`chmod 500` 挡不住 root)。
+- **CI**(`.github/workflows/ci.yml`)跑 `ubuntu-latest` + `windows-latest` × Node `20/22/24`,
+  用 `npm ci`(依赖已提交的 `package-lock.json`)。CI 里 `DSH_MEMORY_VECTOR=off`,且**不跑**
+  `selftest:vector*`(无 llama-server;`selftest-vector.mjs` 还会读作者本机路径)与任何 `acceptance-*`。
+  改了测试集就同步改 workflow,反之亦然。
 - ⚠️ **作为依赖从 npm 装进别的项目时**,`node_modules` 是**平铺(hoisted)**的:本包自己那层
   `node_modules/` 通常根本不存在,SDK 在上一级。所以判断「依赖在不在」必须用
   `import.meta.resolve(...)`(Node 自己的解析器),**不能**看 `existsSync(ROOT/node_modules/...)` ——
@@ -197,8 +210,12 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 - `selftest-mcp.mjs` 会依次探活 `8199` / `8078` / `8200`,探到就复用、探不到就**尝试自行 spawn**
   llama-server(用 `DSH_MEMORY_EMBED_EXE` 的默认值,换机器上必然失败并静默退化为纯词法)。
   它自己会被 server 的 `shutdown` 收掉,但脚本整体会因此慢几秒。
-- `acceptance-standalone.mjs` 的前置条件:8078 与 8199 **都空闲**、且无任何 `llama-server` 在跑
-  (它用 `netstat` + `curl` 自己检查,不满足就会 FAIL)。本机实测两台 llama-server 常驻(8078/8199 各一个),跑之前先确认。
+- `acceptance-standalone.mjs` 的向量后端**只从环境变量读**:`DSH_MEMORY_EMBED_EXE` +
+  `DSH_MEMORY_EMBED_MODEL`(自拉起),或 `DSH_MEMORY_EMBED_ENDPOINT`(复用已有服务)。两者都没配时它
+  打印提示并把「自拉起后端 / 语义召回」标成**跳过**(不算失败);不再拿默认值里的本机路径硬试。
+  端口探活走 `node:net` 的 `connect()` + 原生 `fetch()` 打 `/health`,**不再 shell 出 `netstat` / `curl`**,
+  所以在 Linux / macOS 上也能跑。要验证「冷启动自拉起」那一支,`8199` 必须空闲;已被占用时它只会
+  复用该服务并把「自拉起」标成跳过(实测本机两台 llama-server 常驻 8078/8199,所以默认就落在这一支)。
 - `acceptance-coexist.mjs` **本身是 flaky 的**(实测 8 次里 3 次 exit 1,报
   `✗ FAIL 上游式写者正常跑完(exit=0)`)。原因不是本项目的锁,而是被测对象的内禀缺陷:
   `legacy-writer.mjs` 刻意复刻上游「固定 `${file}.tmp` + `renameSync`」,而 `SharedStore` 用
@@ -206,15 +223,19 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
   后者会拿到 `EPERM: operation not permitted, rename ...`。
   **这恰好是文档里那个论点的活证据** —— 上游的固定 tmp 名在并发下不稳定,所以本项目必须用唯一 tmp 名。
   看到这个 FAIL 时:重跑一次;它不影响产物正确性,也**不是**回归。
-- ⚠️ 两个 `acceptance-*`(real / standalone)会**写真实 store**。除非用户在真实库上明确授权,不要跑。
+- ⚠️ 两个 `acceptance-*`(real / standalone)会**写 store**,所以目标库必须由调用方显式给出:
+  `DSH_MEMORY_REAL_STORE=<你的 storeDir>`。**没设就打印提示并 `exit(0)` 跳过**,绝不回退到任何写死的机器路径。
+  除非用户在真实库上明确授权,不要跑;想先确认脚本逻辑通,把该变量指向 `os.tmpdir()` 下的目录即可。
 - ⚠️ **真实 store 是「活的」**:只要 DSH 开着,它的记忆插件就在往里写(记录、`accessCount`、`scopes.json` 别名)。
   **不要用文件 mtime 判断"测试有没有污染真实库"** —— 改动可能来自 DSH 自己的正常写入
   (实测本机 `projects/7d0429ad....jsonl` 的 mtime 会在你什么都没跑时自己变)。
   判污染看**内容**:`global.jsonl` 里有没有测试专用标记字符串;本仓库的测试都用带随机后缀的标记。
 - `selftest-vector.mjs` 文件头写着「加 `--spawn` 才测试自动拉起」,但脚本**没有**任何 `process.argv` 处理,
   该开关不存在;它永远不会 spawn。
-- `acceptance-real.mjs` 调 `memory_save` 时传的是 `project` 参数,而 schema 里只有 `path` —— 该入参被静默忽略,
-  记录实际落到默认 `global`。脚本靠 id 精确删除所以能自清,但它并没有在测「写 project 作用域」。
+- `acceptance-real.mjs` 曾经传 `project` 参数(而 schema 里只有 `path`),该入参被静默忽略、记录实际落到
+  `global` —— 也就是说它当时**没有在测**「写 project 作用域」。现已改成 `path`,并补了两条断言兜住这个坑:
+  `sc.scope === project:<测试目录>`、以及磁盘上新增的文件在 `projects/` 下。**别只改参数名而不留断言** ——
+  静默忽略的入参不会报错,只会让报告假绿。
 
 ---
 
@@ -242,8 +263,8 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 按顺序跑(也可以并行,彼此独立):
 
 ```bash
-node scripts/selftest-cli.mjs        # 2.3s,CLI 契约 110 项
-node scripts/selftest-tools.mjs      # 0.1s,参数/scope 决策 60 项
+node scripts/selftest-cli.mjs        # 2.3s,CLI 契约 115 项(Windows)/114(POSIX)
+node scripts/selftest-tools.mjs      # 0.1s,参数/scope 决策 60 项(Win)/59(POSIX)
 node scripts/selftest-protocol.mjs   # 0.4s,协议层 18 项
 node scripts/selftest-mcp.mjs        # 1.1s,端到端 40 项
 node scripts/selftest.mjs            # 3.5s,多进程并发 55 项

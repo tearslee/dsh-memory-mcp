@@ -106,7 +106,8 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 
 ### 实测
 
-`scripts/acceptance-standalone.mjs`(在 8078/8199 全空闲、无任何 llama-server 的状态下):
+`scripts/acceptance-standalone.mjs`(在 8078/8199 全空闲、无任何 llama-server 的状态下,
+`DSH_MEMORY_EMBED_EXE` / `DSH_MEMORY_EMBED_MODEL` 已配好):
 
 ```
 ✓ MCP 服务在无 DSH 情况下冷启动成功
@@ -130,6 +131,7 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 - [安装](#安装)
 - [启动](#启动)
 - [命令行与退出码](#命令行与退出码)
+- [验证你的部署](#验证你的部署)
 - [环境变量](#环境变量)
 - [五个工具](#五个工具)
 - [Trae / WorkBuddy 配置](#trae--workbuddy-配置)
@@ -143,8 +145,20 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 
 ## 安装
 
-**要求 Node.js `>= 22.13.0`**(见 `package.json` 的 `engines`)。低版本会在锁层用到的新 API 上失败,
-而且报错信息不会告诉你"是 Node 太旧"—— 这是部署时第一道容易撞上的门槛。
+**要求 Node.js `>= 20.3.0`**(见 `package.json` 的 `engines`)。
+
+这个下限不是随手写的,也不是"Node 越新越好"的意思 —— 它由两个硬约束取较严者决定:
+
+| 约束 | 要求 | 出处 |
+| --- | --- | --- |
+| 源码里用到的 `AbortSignal.any()` | **>= 20.3.0** | `src/vector.js`(`AbortSignal.any` 在 Node 20.3.0 才出现;20.2 及以前是 `undefined`) |
+| 依赖树里的 `@hono/node-server` | >= 20 | MCP SDK 的传递依赖 |
+
+所以 **20.3.0** 是真实下限。低于它会在运行到向量检索时抛 `AbortSignal.any is not a function`,
+而且那个报错不会告诉你"是 Node 太旧"—— 这是部署时第一道容易撞上的门槛。
+
+> Node 18.20 上实测整套自测也能过,但那是走运:`AbortSignal.any` 只在「带 signal 调 `embed()`」这条
+> 运行期路径上才会执行到。靠"恰好没踩到"的兼容不算兼容,所以下限没有定在 18。
 
 两种装法,任选一种:
 
@@ -251,6 +265,105 @@ dsh-memory-mcp 0.1.0
 
 需要完整调用栈时设 `DSH_MEMORY_DEBUG=1`。已覆盖的诊断:盘符不存在、父目录不存在、路径已存在且是个文件、
 无写入权限、缺依赖(`npm install` 提示)。
+
+## 验证你的部署
+
+刚 `npm install` 完,别急着配 IDE —— 先用下面 5 步确认**你自己这台机器**是好的。
+全部用临时目录,不会碰你真实的记忆库。
+
+> 下面命令块是 **bash / zsh** 写法;PowerShell 的差异标在每行后面的注释里。
+> ④⑤ 里的 `--store-dir` 指向一个临时目录,**跑完可以直接删**。
+
+```bash
+# ① Node 版本够不够(要 >= 20.3.0;低于它会在向量检索时才炸,很难查)
+node -v
+node -p "require('./package.json').engines.node"
+
+# ② 依赖 + 版本 + storeDir 一次查完(只读,不建目录、不碰记忆库)
+node scripts/check-install.mjs
+#   想连"我会落到哪个 storeDir"一起确认,就把要用的参数带上:
+#   node scripts/check-install.mjs --store-dir <你的 DSH storeDir>
+
+# ③ CLI 能自描述(--version / --help 都不加载 SDK、不建目录,依赖没装也能用)
+node src/index.js --version
+node src/index.js --help | head -3
+#   PowerShell: node src/index.js --help | Select-Object -First 3
+
+# ④ 实际生效的 storeDir 对不对 —— 看 stderr 首三行
+#    注意 stdin 必须关掉/喂空,否则 stdio 服务会一直等输入不退出
+echo '' | node src/index.js --store-dir /tmp/dsh-probe
+#   PowerShell: echo '' | node src/index.js --store-dir "$env:TEMP\dsh-probe"
+
+# ⑤ MCP 握手通不通(喂一个 initialize 给 stdin,stdout 应回一行 JSON-RPC)
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"selfcheck","version":"1.0.0"}}}' \
+  | node src/index.js --store-dir /tmp/dsh-probe
+#   PowerShell 用上面这条原样即可(echo 是 Write-Output 的别名,单行 JSON 没问题)
+```
+
+**每一步该看到什么**(以下输出在 Windows(Node 26)与 Linux(Node 20/22/24)上逐条实际跑过;
+除路径写法以外一致)。
+
+① 版本检查 —— `engines` 会原样打出来,自己比一下:
+```
+v26.3.0
+>=20.3.0
+```
+
+② 部署自检 —— 三行绿色 `✅` 就是好的:
+```
+  ✅ Node 版本 26.3.0(要求 >= 20.3.0)
+  ✅ 依赖 @modelcontextprotocol/sdk 1.32.1
+     file:///C:/path/to/dsh-memory-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/index.js
+  ✅ 入口 src/index.js 存在
+```
+然后它会告诉你**会落到哪个 storeDir**。如果用的是默认值,你会看到一条 `⚠️`:
+```
+  ⚠️  storeDir = C:\Users\me\.dsh-memory-store
+     ⇒ 这是**默认值**。它只保证能跑,不保证就是你 DSH 在用的那个库。
+```
+看到这条 `⚠️` 就要警惕了 —— 接着带上真实参数再跑一次,确认它认得出你的库:
+```bash
+node scripts/check-install.mjs --store-dir <你的 DSH storeDir>
+# 期望多出一行:✓ 该目录里有 global.jsonl,看起来是一份已有的记忆库
+```
+
+> **为什么不用 `npm ls @modelcontextprotocol/sdk --depth=0`**:从 npm 装进别的项目时
+> `node_modules` 是**平铺(hoisted)**的,本包目录下没有自己的 `node_modules`,
+> `npm ls` 会打出 `-- (empty)` —— 那表示"依赖被提升到上一层",**不是**"没装",
+> 很容易让人误判成安装失败。`check-install.mjs` 用 Node 自己的解析算法,两种布局下都准。
+
+③ 自描述 —— 退出码 `0`,且 `--help` 第一行带版本号:
+```
+dsh-memory-mcp 0.1.0
+dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务(stdio)
+```
+
+④ **这一步最容易查出问题**。前几行 stderr 就是**实际生效**的配置(不是你以为的那个)。
+第 4 行起是向量后端的日志,因机器而异(关闭 / 复用已有服务 / 自行拉起 / 启动失败退化),
+**不影响判断 —— 只看前 3 行**。看到 `已启动 dsh-memory-mcp v0.1.0(stdio)` 即启动成功:
+```
+[dsh-memory-mcp] store-dir  = C:\Users\me\AppData\Local\Temp\dsh-probe
+[dsh-memory-mcp] project   = D:\dev\my-app(project 作用域 = project:D:\dev\my-app)
+[dsh-memory-mcp] 默认保存作用域 = global
+[dsh-memory-mcp] 已启动 dsh-memory-mcp v0.1.0(stdio)        ← 这行 = 启动成功
+```
+- `store-dir` 必须等于**你 DSH 插件正在用的那个目录**。不相等 = 两边看到两份互不相通的库。
+- 没传 `--store-dir` 时会额外多打一行 `ℹ️ 未指定 --store-dir … 使用默认目录`,说明你正在用默认库
+  (`~/.dsh-memory-store`),**多半不是你 DSH 那个**。
+- 对照办法:去那个目录 `ls`,有没有 `global.jsonl`。
+- 若看到 `vector: llama-server 启动失败(…),向量后端不可用,退化为纯词法检索`:**不是错误**,
+  服务照常工作,只是没有语义召回。换机器后想恢复向量,按 [环境变量](#环境变量) 那张表配
+  `DSH_MEMORY_EMBED_EXE` + `DSH_MEMORY_EMBED_MODEL`,或直接设 `DSH_MEMORY_VECTOR=off` 关掉它。
+
+⑤ 握手 —— stdout **只有一行** JSON-RPC(日志全在 stderr,这是 stdio 传输的硬要求):
+```json
+{"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"dsh-memory-mcp","version":"0.1.0"}},"jsonrpc":"2.0","id":1}
+```
+看到这行 = 进程能拉起来、协议层是通的。想让 IDE 之外更完整地验一遍工具清单,直接跑
+`npm test`(见 [自测](#自测))。
+
+> ④⑤ 里 `--store-dir` 指向的临时目录**跑完可以删**;它只证明"能启动",不代表配好了。
+> 真正要共用记忆时,必须显式 `--store-dir` 指向 DSH 插件的 `storeDir`。
 
 ## 环境变量
 
@@ -719,24 +832,27 @@ node scripts/selftest-protocol.mjs     # 协议层:握手 / tools/list / tools/c
 node scripts/selftest-vector.mjs       # 向量后端:配置 / 探活 / 熔断 / 生命周期
 node scripts/selftest-vector-e2e.mjs   # 向量端到端:写 .vec 边车 + 语义召回
 
-# 验收测试(会碰真实 store,除非你明确要验"与真实库共存"否则别跑)
+# 验收测试(会碰 store;真实库那一份需要你先指定 DSH_MEMORY_REAL_STORE,不设就跳过)
 node scripts/acceptance-real.mjs       # 端到端打真实 storeDir(只写/只删自己造的记录)
 node scripts/acceptance-coexist.mjs    # 与「上游式无锁写者」并存的实测数据(用临时目录)
-node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(需 8078/8199 都空闲)
+node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(纯词法可跑;自拉起后端需配环境变量)
 ```
 
 | 脚本 | 覆盖 | 检查项 | 碰真实 store? |
 | --- | --- | --- | --- |
-| `selftest-cli.mjs` | CLI 契约:`--help`/`--version` 的零副作用、未知参数 exit 2、启动失败诊断无裸栈、`parseArgs`/`resolveConfig` 纯函数 | **110** | 否 |
+| `selftest-cli.mjs` | CLI 契约:`--help`/`--version` 的零副作用、未知参数 exit 2、启动失败诊断无裸栈、`parseArgs`/`resolveConfig` 纯函数 | **115**(POSIX 114,有一条 Windows 专有断言) | 否 |
 | `selftest-mcp.mjs` | 真实 stdio 握手、5 个工具的 schema、保存、检索、幂等、列表/按前缀取回、删除后不再召回、错误码、向量开关对比、落盘检查、stderr 日志 | **40** | 否 |
 | `selftest.mjs` | 单进程语义、**4 进程 × 20 条真并发**、外部追加不被抹除、跨进程锁(超时/陈旧锁/粒度)、`.vec` 边车、别名映射 | **55** | 否 |
-| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、schema 自检 | **60** | 否 |
+| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、schema 自检 | **60**(POSIX 59,盘符大小写折叠是 Windows 专有语义) | 否 |
 | `selftest-protocol.mjs` | 握手、tools/list、tools/call 正常/错误路径、stdout 纯净性 | **18** | 否 |
 | `selftest-vector.mjs` | 配置解析、探活、复用不 spawn、维度、L2 归一化、熔断退避、与已存向量的空间兼容性 | **27** | **只读** |
 | `selftest-vector-e2e.mjs` | 写 `.vec` 边车 → 读回 → 不同措辞的语义召回 | **6** | 否 |
-| `acceptance-real.mjs` | 对**真实** storeDir 跑完整协议:写入 → 磁盘可见 → 跨作用域读回 → 幂等 → 按前缀取回 → 删除 → 确认仍能读到 DSH 既有记忆 | **13** | **是**(只删自己造的) |
+| `acceptance-real.mjs` | 对**你指定的** storeDir 跑完整协议:写入(**`path` ⇒ `project:` 作用域,并断言不是 `global`**)→ 磁盘可见 → 跨作用域读回 → 幂等 → 按前缀取回 → 删除 → 尝试确认仍能读到 DSH 既有记忆 | **18** | 需 `DSH_MEMORY_REAL_STORE`(只删自己造的) |
 | `acceptance-coexist.mjs` | 与复刻上游「内存快照+全量重写」的无锁写者并发,量化双向互毁的损失 | **4** | 否(临时目录) |
-| `acceptance-standalone.mjs` | **不开 DSH**:冷启动 → 自拉起向量后端 → 读写 → 语义召回 → 退出后无孤儿进程 | **11** | **是**(只删自己造的) |
+| `acceptance-standalone.mjs` | **不开 DSH**:冷启动 → (可选)自拉起向量后端 → 读写 → 语义召回 → 退出后无孤儿进程 | **11** | 需 `DSH_MEMORY_REAL_STORE`(只删自己造的) |
+
+> 检查项数在 Windows 与 Linux 上有 1~2 项差异,这是**刻意的**:被跳过的都是平台专有语义
+> (盘符不存在、盘符大小写折叠),在 POSIX 上断言它们反而是错的。CI 两个平台都跑,数字对不上是正常的。
 
 `selftest-mcp.mjs` 用官方 SDK 的 `Client` + `StdioClientTransport` 起**自己**,
 真实走一遍完整的 MCP 协议握手(`initialize` → `tools/list` → `tools/call`)。
@@ -744,14 +860,27 @@ node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(需 80
 ### 跑测试前必须知道的几件事
 
 - **默认 `npm test` 不碰真实 store**:它 = `selftest-cli.mjs && selftest-mcp.mjs && selftest.mjs`。
-- **`acceptance-real.mjs` 与 `acceptance-standalone.mjs` 会写真实 store**。它们只删自己造的记录,
-  但如果你半路 Ctrl-C,可能会在 `global` 里留下几条测试记录。并且两者的路径**写死成作者本机路径**
-  (`D:/dev/.dsh-memory-store`、`D:/dev/dsh-memory-mcp/src/index.js`),换机器跑之前必须先改。
+- **`acceptance-real.mjs` 与 `acceptance-standalone.mjs` 会写 store**,所以目标库必须由你显式给出:
+  ```bash
+  # PowerShell
+  $env:DSH_MEMORY_REAL_STORE = "D:\dev\.dsh-memory-store"; node scripts/acceptance-real.mjs
+  # bash / zsh
+  DSH_MEMORY_REAL_STORE=~/.dsh-memory-store node scripts/acceptance-real.mjs
+  ```
+  **没设这个变量时它们只打印一行提示然后 `exit(0)` 跳过**(退出码 0 表示"没测",不是"测过了")。
+  脚本**不会猜路径、也不会回退到任何写死的机器路径**;入口路径从脚本自身位置推导,换机器不用改。
+  它们只删自己造的记录,但半路 Ctrl-C 仍可能在库里留下几条带随机后缀标记的记录。
+  想先确认脚本逻辑通、又不碰真实库:把该变量指向 `os.tmpdir()` 下的临时目录即可。
+- **`acceptance-standalone.mjs` 的向量后端也只从环境变量读**:`DSH_MEMORY_EMBED_EXE` +
+  `DSH_MEMORY_EMBED_MODEL`(自拉起)或 `DSH_MEMORY_EMBED_ENDPOINT`(复用已有服务)。
+  都没配就打印提示,并把「自拉起后端 / 语义召回」标成**跳过** —— 不报 FAIL,也不拿作者本机的
+  默认路径硬试。端口探活用 `node:net` + 原生 `fetch()`,跨平台,不需要 `netstat` / `curl`。
 - ⚠️ **真实 store 是「活的」**:只要 DSH 开着,它的记忆插件就在往里写(记录、`accessCount`、
   `scopes.json` 别名),MCP 侧检索命中也会刷 `accessCount`。所以**不要拿文件 mtime 判断"测试有没有污染真实库"** ——
   改动可能来自 DSH 自己的正常写入。要判断污染,看的是**内容**:`global.jsonl` 里有没有测试专用标记字符串。
-- **`acceptance-standalone.mjs` 的前置条件**:8078 与 8199 **都空闲**、且没有任何 `llama-server` 在跑 ——
-  它自己会检查,不满足直接 FAIL。它不是坏了,是环境不对。
+- **`acceptance-standalone.mjs` 要验证「自拉起向量后端」这一支时**,该端口(默认 8199)必须空闲;
+  已被占用时它只会复用那个服务,并把「自拉起」标成**跳过**(不算失败)。
+  本机实测两台 `llama-server` 常驻(8078/8199 各一个),所以默认就落在"复用"这一支。
 - **`selftest-vector.mjs` 会读**(不写)真实 store 里的 `global.vec` 做向量空间比对;
   该文件不存在时自动跳过那几项。
 - **`selftest-vector-e2e.mjs` 在无可用向量后端时直接 `exit(0)` 跳过** ——

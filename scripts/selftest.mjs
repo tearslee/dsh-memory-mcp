@@ -219,7 +219,10 @@ async function run() {
 
   await test('文件路径映射与上游一致(global.jsonl / projects/<sha1>.jsonl)', () => {
     assertEqual(scopeFileName('global'), 'global.jsonl', 'global 文件名')
-    const expected = `projects\\${createHash('sha1').update(SCOPE).digest('hex')}.jsonl`
+    // `scopeFileName()` 用 `join()` 产出**平台分隔符**(Windows `\`,POSIX `/`)。
+    // 这里不能写字面量 `projects\\...`:在 Linux/macOS 上 `\` 是普通文件名字符,
+    // 断言会因为分隔符而不是逻辑挂掉(CI 的 ubuntu 矩阵就是靠这条暴露出来的)。
+    const expected = join('projects', `${createHash('sha1').update(SCOPE).digest('hex')}.jsonl`)
     assertEqual(scopeFileName(SCOPE), expected, 'project scope 文件名')
     assert(existsSync(join(rootB, scopeFileName(SCOPE))), '数据文件应真实存在')
   })

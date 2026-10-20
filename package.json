@@ -36,6 +36,7 @@
   },
   "author": "tearslee <tears.lee.cn@gmail.com>",
   "scripts": {
+    "check-install": "node scripts/check-install.mjs",
     "selftest": "node scripts/selftest-mcp.mjs",
     "selftest:store": "node scripts/selftest.mjs",
     "selftest:tools": "node scripts/selftest-tools.mjs",
@@ -46,7 +47,7 @@
     "test": "node scripts/selftest-cli.mjs && node scripts/selftest-mcp.mjs && node scripts/selftest.mjs"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=20.3.0"
   },
   "keywords": [
     "mcp",

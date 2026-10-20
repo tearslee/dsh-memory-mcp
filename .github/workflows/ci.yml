@@ -1,0 +1,82 @@
+name: CI
+
+# 这个仓库是给别人"装完就用"的部署件,所以 CI 的职责只有一个:
+# **证明在别人机器上(不只是作者这台 Windows)装得上、跑得起来。**
+#
+# 刻意不跑的东西(见下方 env 注释与 README「自测」一节的说明):
+#   - selftest-vector / selftest-vector-e2e:CI 里没有 llama-server;
+#     而且 selftest-vector.mjs 会去读作者本机的 D:\dev\.dsh-memory-store\global.vec。
+#   - acceptance-*:需要真实记忆库,会写盘。
+# 这几项留给人手动跑,不进 CI。
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    # 自测里有并发 / 子进程 / 临时目录;真挂住时靠它兜底(而不是让 job 卡满 6 小时)。
+    timeout-minutes: 10
+
+    strategy:
+      # 一个组合挂了不要取消其他组合 —— 平台相关的失败必须看得全,
+      # 否则修掉 ubuntu 之后才发现 windows 也红了。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 20 = `engines.node` 的真实下限(>=20.3.0,由 src/vector.js:366 的
+        #      AbortSignal.any() 决定)。setup-node 只能给到 major,拿不到 20.3 这个
+        #      小版本,所以解析到的是 20 的最新版 —— 对"下限能不能跑"是够的。
+        # 22 / 24 = 当前广泛使用的 LTS / 新 LTS。
+        node: [20, 22, 24]
+
+    env:
+      # 关掉向量:CI 没有 llama-server,开着只会每次都走"探活失败 → spawn 失败 → 退化"
+      # 这条路,日志噪音大、还多花时间。纯词法检索的断言不受影响。
+      DSH_MEMORY_VECTOR: off
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          # 依赖 `package-lock.json`(已提交)。少了它这一步会直接报错 ——
+          # 这本身也是一条"lock 文件必须留在仓库里"的守卫。
+          cache: npm
+
+      # 用 `npm ci` 而不是 `npm install`:
+      #   - 仓库提交了 package-lock.json,`npm ci` 严格按 lock 里的版本树安装,
+      #     不受传递依赖新版本发布影响(构建可复现);
+      #   - lock 与 package.json 不一致时 `npm ci` 会**直接失败**,
+      #     等于免费多了一条"改了依赖忘了更新 lock"的检查;
+      #   - `cache: npm` 也要求 lock 文件存在。
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # 部署自检 —— 这是 CI 里最像"用户装完第一次跑"的一步:
+      # 它只读(不建目录、不碰记忆库),检查 Node 版本 / 依赖能否解析 / 入口存在 / storeDir 落在哪。
+      # 放在测试之前:如果这一层不过,后面的红都是它的连带,先修这里。
+      - name: Deployment self-check
+        run: npm run check-install
+
+      # `npm test` = selftest-cli && selftest-mcp && selftest(存储层并发,会真 fork 子进程)
+      - name: Test (npm test)
+        run: npm test
+
+      # 工具层:参数校验 / scope 决策 / 渲染(内存版假 store,不碰 SDK)
+      - name: Test (tool layer)
+        run: npm run selftest:tools
+
+      # 协议层:握手 / tools/list / tools/call / stdout 纯净性(内存版假 store)
+      - name: Test (protocol layer)
+        run: npm run selftest:protocol

@@ -13,9 +13,9 @@
 
 ## Quick start
 
-- [安装](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#安装): 要求 Node `>= 22.13.0`。`git clone` + `npm install`,或 `npm install dsh-memory-mcp`。唯一外部依赖是 `@modelcontextprotocol/sdk@1.32.1`,存储层 8 个文件零外部依赖。
+- [安装](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#安装): 要求 Node `>= 20.3.0`(`AbortSignal.any()` 自 Node 20.3.0 起提供,是源码里的硬下限)。`git clone` + `npm install`,或 `npm install dsh-memory-mcp`。唯一外部依赖是 `@modelcontextprotocol/sdk@1.32.1`,存储层 8 个文件零外部依赖。
 - [启动](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#启动): `node src/index.js --store-dir <dir> --project <dir>`。默认 store 目录是平台中立的 `~/.dsh-memory-store`,但它**不一定是你 DSH 在用的那个** —— 与 DSH 共用记忆时必须显式传 `--store-dir` 指向 DSH 插件的 `storeDir`,否则两边是两份互不相通的库。
-- [package.json](https://github.com/tearslee/dsh-memory-mcp/blob/main/package.json): `engines.node >= 22.13.0`、`"type": "module"`(纯 ESM,无构建步骤)、`bin` 指向 `src/index.js`。
+- [package.json](https://github.com/tearslee/dsh-memory-mcp/blob/main/package.json): `engines.node >= 20.3.0`、`"type": "module"`(纯 ESM,无构建步骤)、`bin` 指向 `src/index.js`、`package-lock.json` 已提交(CI 用 `npm ci` 复现构建)。
 - [src/index.js](https://github.com/tearslee/dsh-memory-mcp/blob/main/src/index.js): bin 入口。`--project` / `--project-dir` / `--store-dir` / `--store` 四个 flag 的空格与等号两种写法都支持。
 - **CLI 自描述**:`node src/index.js --help` / `--version` 打到 stdout 并 exit 0,且**不加载 MCP SDK、不建目录**,所以依赖没装也能查用法。未知参数(如笔误 `--store_dir`)一律 exit **2**,不再静默回退到默认 store。退出码:`0` 正常 / `1` 启动失败 / `2` 参数错误。
 
@@ -41,13 +41,14 @@
 ## Running & verification
 
 - [自测](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#自测): 全部脚本的用途、检查项数、耗时与「是否碰真实 store」对照表。默认 `npm test` 不碰真实库。
-- [scripts/selftest-cli.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-cli.mjs): CLI 契约 110 项(`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析)。零副作用:缺依赖场景是把 `src/` 复制到 tmpdir 再跑,不碰真实 `node_modules`。见 [AGENTS.md 的测试地图](https://github.com/tearslee/dsh-memory-mcp/blob/main/AGENTS.md)。
+- [.github/workflows/ci.yml](https://github.com/tearslee/dsh-memory-mcp/blob/main/.github/workflows/ci.yml): CI 在 **ubuntu-latest + windows-latest × Node 20/22/24** 上跑 `npm ci` + `npm test` + tools/protocol 两层。刻意不跑 `selftest:vector*`(无 llama-server)与 `acceptance-*`(需真实库)。`package-lock.json` 已提交,构建可复现。
+- [scripts/selftest-cli.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-cli.mjs): CLI 契约 **115 项**(POSIX 114:有一条是 Windows 专有的"盘符不存在"断言)。`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析。零副作用:缺依赖场景是把 `src/` 复制到 tmpdir 再跑,不碰真实 `node_modules`。见 [AGENTS.md 的测试地图](https://github.com/tearslee/dsh-memory-mcp/blob/main/AGENTS.md)。
 - [scripts/selftest-mcp.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-mcp.mjs): 主自测。用 SDK `Client` + `StdioClientTransport` 起自己,真走 `initialize → tools/list → tools/call`,共 40 项,约 1 秒,只用 tmpdir。
 - [scripts/selftest.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest.mjs): 多进程并发自测(4 进程 × 20 条)。开头有 `assertNotRealStore()` 硬守卫,命中真实路径直接中止,共 55 项。
 - [scripts/selftest-tools.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-tools.mjs) / [selftest-protocol.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-protocol.mjs): 用内存假 store 覆盖参数校验、scope 决策与协议层/ stdout 纯净性。
 - [scripts/selftest-vector.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-vector.mjs): 配置解析、探活、熔断退避。只读,可安全跑;若真实 store 的 `global.vec` 存在会**读**它比对向量空间。
-- [scripts/acceptance-real.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-real.mjs): ⚠️ **会写真实 store**,结束后按 id 删除自己造的记录。store 路径写死成作者本机 `D:/dev/.dsh-memory-store`,换机器前先改。
-- [scripts/acceptance-standalone.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-standalone.mjs): ⚠️ 同样打真实 store,且 `ENTRY` 写死 `D:/dev/dsh-memory-mcp/src/index.js`,换机器直接挂。要求 8078 / 8199 都空闲。
+- [scripts/acceptance-real.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-real.mjs): ⚠️ **会写 store**,结束后按 id 删除自己造的记录。目标库由 `DSH_MEMORY_REAL_STORE` 指定,**未设置时打印提示并 `exit(0)` 跳过**(不猜路径、也不回退到任何机器路径)。写入走 `memory_save` 的 `path` 参数并**断言** scope 为 `project:<测试目录>`,不是 `global`。
+- [scripts/acceptance-standalone.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-standalone.mjs): ⚠️ 同样需要一个 `DSH_MEMORY_REAL_STORE`(未设则跳过)。入口从脚本自身位置推导(`scripts/..`),不写死;向量后端读 `DSH_MEMORY_EMBED_EXE`/`DSH_MEMORY_EMBED_MODEL`,未配时相关小节标「跳过」。端口探活用 `node:net` 的 `connect()` + 原生 `fetch()`,跨平台,不依赖 `netstat` / `curl`。
 - [scripts/acceptance-coexist.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-coexist.mjs): 与复刻上游「无锁 + 内存快照 + 全量重写」的写者并发,量化双向丢数据。临时目录,不碰真实 store。**已知 flaky**(~3/8 次 `legacy-writer` 报 `EPERM rename`,这是被测的固定 tmp 名缺陷本身,不是本项目的回归)。
 
 ## Invariants & gotchas
@@ -62,10 +63,11 @@
 ## Source layout
 
 - [src/](https://github.com/tearslee/dsh-memory-mcp/tree/main/src): 9 个 ESM 文件。`index.js`(入口)/ `server.js`(stdio 传输,唯一 import MCP SDK 的地方)/ `tools.js` / `store.js` / `lock.js` / `scope.js` / `scope-names.js` / `scoring.js` / `vector.js`。
-- [scripts/](https://github.com/tearslee/dsh-memory-mcp/tree/main/scripts): 7 个 `selftest-*.mjs` + 3 个 `acceptance-*.mjs` + `legacy-writer.mjs`(复刻上游无锁写者,仅供验收脚本使用)。⚠️ 两个 `acceptance-*.mjs` 里写死了作者本机绝对路径。
+- [scripts/](https://github.com/tearslee/dsh-memory-mcp/tree/main/scripts): 7 个 `selftest-*.mjs` + 3 个 `acceptance-*.mjs` + `legacy-writer.mjs`(复刻上游无锁写者,仅供验收脚本使用)。两个 `acceptance-*.mjs` 要用真实库时需显式设 `DSH_MEMORY_REAL_STORE`(未设则跳过),**不写死任何机器路径**。
 - [package.json `exports`](https://github.com/tearslee/dsh-memory-mcp/blob/main/package.json): 每个 src 文件都暴露成子路径(`./store` `./vector` …)。新增文件必须同步补 `exports`。
 
 ## License
 
-- [LICENSE](https://github.com/tearslee/dsh-memory-mcp/blob/main/LICENSE): MIT,Copyright (c) 2026 tearslee。- [third-party-notices.md](https://github.com/tearslee/dsh-memory-mcp/blob/main/third-party-notices.md): 上游 `@restregular/dsh-memory` 同为 MIT,复制内容的逐文件来源与版权声明。
+- [LICENSE](https://github.com/tearslee/dsh-memory-mcp/blob/main/LICENSE): MIT,Copyright (c) 2026 tearslee。
+- [third-party-notices.md](https://github.com/tearslee/dsh-memory-mcp/blob/main/third-party-notices.md): 上游 `@restregular/dsh-memory` 同为 MIT,复制内容的逐文件来源与版权声明。
 - [许可与第三方声明](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#许可与第三方声明): README 中的对应章节。

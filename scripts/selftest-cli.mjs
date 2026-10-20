@@ -23,7 +23,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -226,26 +226,75 @@ try {
   section('4. 启动失败诊断:store 目录不可建 ⇒ 中文提示、无裸栈')
   // ────────────────────────────────────────────────────────────
   {
-    // Q: 这个盘符在测试机上不存在 ⇒ mkdir 抛 ENOENT(与用户实测场景一致)。
-    const r = runCli(['--store-dir', 'Q:/nope/store'], { DSH_MEMORY_VECTOR: 'off' })
-    check('不可建的 store-dir ⇒ 退出码 1', r.status === 1, `status=${r.status}`)
+    // ⚠️ 构造"建不出来"的路径必须**分平台**,否则这条用例在 Linux CI 上必然假红:
+    //    `Q:/nope/store` 只在 Windows 是「盘符不存在」;在 POSIX 上 `Q:` 只是个普通目录名,
+    //    resolve() 之后变成 `$PWD/Q:/nope/store`,mkdir **会成功** → 服务正常启动 → 6 条断言全崩。
+    //    (2026-10-20 在 WSL Ubuntu + Node 24 上实测到过这个假红。)
+    //    POSIX 侧不用 `/proc`(实测会卡住:procfs 里 mkdir 不返回),改用**父路径是普通文件**
+    //    —— mkdir 必然 ENOTDIR,可控且不依赖权限位(CI 里可能以 root 跑,chmod 挡不住 root)。
+    const isWin = process.platform === 'win32'
+    let brokenStore
+    let brokenParentFile = null
+    if (isWin) {
+      brokenStore = 'Q:/nope/store'
+    } else {
+      brokenParentFile = join(makeTempDir('broken-parent'), 'afile')
+      writeFileSync(brokenParentFile, 'x')
+      brokenStore = join(brokenParentFile, 'store')
+    }
+    const reasonPattern = isWin ? /盘符|父目录不存在/u : /父目录不存在|是个文件|创建失败|没有写入权限/u
+    // 平台相关的错误码:Windows 是 ENOENT(盘符不存在),POSIX 上 ENOTDIR(父路径是文件)。
+    const codePattern = isWin ? /ENOENT/u : /ENOTDIR|EACCES|EPERM|ENOENT/u
+
+    const r = runCli(['--store-dir', brokenStore], { DSH_MEMORY_VECTOR: 'off' })
+    check('不可建的 store-dir ⇒ 退出码 1', r.status === 1, `status=${r.status} target=${brokenStore}`)
     check('不可建的 store-dir ⇒ stderr 不含 4 空格缩进的栈帧', !hasStackFrames(r.stderr),
       r.stderr.trim().split('\n').slice(0, 3).join(' | '))
     check('不可建的 store-dir ⇒ 含可操作中文提示(改 --store-dir)',
       r.stderr.includes('--store-dir') && r.stderr.includes('⇒'), '')
-    check('不可建的 store-dir ⇒ 说明原因(盘符不存在)',
-      /盘符|父目录不存在/u.test(r.stderr),
+    check('不可建的 store-dir ⇒ 说明原因',
+      reasonPattern.test(r.stderr),
       r.stderr.trim().split('\n').find((l) => l.includes('原因')) ?? '(无原因行)')
     check('不可建的 store-dir ⇒ 最后附原始 error.code',
-      r.stderr.includes('ENOENT'), '')
+      codePattern.test(r.stderr), '')
     check('不可建的 store-dir ⇒ 未打印完整堆栈(不含 "    at ")',
       !/^\s{2,}at\s/mu.test(r.stderr), '')
-    check('不可建的 store-dir ⇒ 不会创建该目录', !existsSync('Q:/nope/store'), '')
+    if (isWin) {
+      check('不可建的 store-dir ⇒ 不会创建该目录', !existsSync(brokenStore), brokenStore)
+    }
 
     // DSH_MEMORY_DEBUG=1 才打栈 —— 这是"默认不打栈"的反向证明。
-    const dbg = runCli(['--store-dir', 'Q:/nope/store'], { DSH_MEMORY_VECTOR: 'off', DSH_MEMORY_DEBUG: '1' })
+    const dbg = runCli(['--store-dir', brokenStore], { DSH_MEMORY_VECTOR: 'off', DSH_MEMORY_DEBUG: '1' })
     check('DSH_MEMORY_DEBUG=1 ⇒ 才附带调用栈', dbg.status === 1 && hasStackFrames(dbg.stderr),
       `status=${dbg.status} hasStack=${hasStackFrames(dbg.stderr)}`)
+
+    // ── 默认目录不可用时,文案必须给出**能走通**的指令 ──────────────
+    // 真实场景(2026-10-20 实测):用户主目录不可写时,旧文案会说
+    //   「改 --store-dir 指向…默认是 <同一个目录>」
+    // —— 用户照着改只会原地打转。这条断言就是防它退回去。
+    const { describeStartupError } = await import('../src/index.js')
+    const mkErr = () => {
+      const e = new Error("EPERM: operation not permitted, mkdir 'X'")
+      e.code = 'EPERM'
+      e.storeDir = DEFAULT_STORE_DIR
+      return e
+    }
+    const asDefault = describeStartupError(Object.assign(mkErr(), { storeDirIsDefault: true }), { env: {} })
+    const asExplicit = describeStartupError(Object.assign(mkErr(), { storeDirIsDefault: false }), { env: {} })
+    const defText = asDefault.lines.join('\n')
+    const expText = asExplicit.lines.join('\n')
+
+    check('默认目录不可用 ⇒ 文案点明「你没有指定过它,用的是默认值」',
+      defText.includes('没有指定过') && defText.includes('默认值'), '')
+    check('默认目录不可用 ⇒ 要求**显式指定可写目录**,而不是叫用户改回默认目录',
+      defText.includes('显式指定') && !defText.includes(`默认是 ${DEFAULT_STORE_DIR}`), '')
+    check('默认目录不可用 + 权限错误 ⇒ 提示用户主目录本身可能不可写',
+      defText.includes('主目录') && defText.includes(homedir()), '')
+    check('显式指定目录不可用 ⇒ 仍给出「改 --store-dir」指引(不破坏原有路径)',
+      expText.includes('改 --store-dir') && expText.includes('⇒'), '')
+    check('两种诊断都只给 exit 1 且不含栈帧',
+      asDefault.exitCode === 1 && asExplicit.exitCode === 1
+      && !hasStackFrames(defText) && !hasStackFrames(expText), '')
   }
 
   // ────────────────────────────────────────────────────────────

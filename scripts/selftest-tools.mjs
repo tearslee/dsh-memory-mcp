@@ -4,7 +4,37 @@
  *
  * 用法:node scripts/selftest-tools.mjs
  */
+import { join } from 'node:path'
+
 import { normalizeProjectPath, projectScopeKey, createTools, runTool, TOOL_NAMES, TOOL_SCHEMAS } from '../src/tools.js'
+
+/**
+ * 路径样例**必须按平台取**。
+ *
+ * `normalizeProjectPath()` 用的是 `node:path`,语义天然跟着平台走:Windows 上
+ * `D:\dev\app` 是绝对路径、盘符会被统一大写;POSIX 上 `\` 只是**普通文件名字符**,
+ * `D:\dev\app` 是相对路径,`d:` 和 `D:` 是两个不同目录。
+ *
+ * 所以「用 Windows 盘符字面量断言 POSIX 行为」的测试只在开发机上成立 ——
+ * 在 `ubuntu-latest` 上会成片假失败。这里取平台对应的绝对路径,
+ * 让断言保持**同一个意图**(去尾分隔符 / 折叠 ../ / 相对解析 / 大小写),
+ * 而不是把 Windows 语义硬编码成唯一正确答案。
+ *
+ * `otherAlt` 用来验「同一目录不同写法归一」:Windows 盘符大小写不敏感
+ * (`d:` ≡ `D:`,由 `normalizeProjectPath` 显式折叠),POSIX 上用 `//` 与 `/` 等价写法。
+ */
+const WIN = process.platform === 'win32'
+const P = WIN
+  ? {
+      app: 'D:\\dev\\app', appTrail: 'D:\\dev\\app\\', appParent: '..\\other',
+      other: 'D:\\dev\\other', otherTrail: 'D:\\dev\\other\\', otherAlt: 'd:\\dev\\other',
+      proj: 'D:\\dev\\proj', elsewhere: 'C:\\x',
+    }
+  : {
+      app: '/srv/dev/app', appTrail: '/srv/dev/app/', appParent: '../other',
+      other: '/srv/dev/other', otherTrail: '/srv/dev/other/', otherAlt: '//srv//dev/other',
+      proj: '/srv/dev/proj', elsewhere: '/srv/x',
+    }
 
 let failures = 0
 const results = []
@@ -94,16 +124,20 @@ console.log('═'.repeat(70))
 
 // ── 路径归一化 ──────────────────────────────────────────────────
 console.log('\n[1] 路径归一化')
-check('绝对路径去掉末尾分隔符', normalizeProjectPath('D:\\dev\\app\\', 'C:\\x') === 'D:\\dev\\app', normalizeProjectPath('D:\\dev\\app\\', 'C:\\x'))
-check('盘符统一大写', normalizeProjectPath('c:\\dev\\app', 'C:\\x') === 'C:\\dev\\app', normalizeProjectPath('c:\\dev\\app', 'C:\\x'))
-check('折叠 . 与 ..', normalizeProjectPath('D:\\dev\\app\\..\\app', 'C:\\x') === 'D:\\dev\\app', normalizeProjectPath('D:\\dev\\app\\..\\app', 'C:\\x'))
-check('相对路径按 base 解析', normalizeProjectPath('sub', 'D:\\dev\\app') === 'D:\\dev\\app\\sub', normalizeProjectPath('sub', 'D:\\dev\\app'))
-check('相对路径按 base 解析(带 ..)', normalizeProjectPath('..\\other', 'D:\\dev\\app') === 'D:\\dev\\other', normalizeProjectPath('..\\other', 'D:\\dev\\app'))
-check('projectScopeKey 形状', projectScopeKey('D:\\dev\\app') === 'project:D:\\dev\\app', projectScopeKey('D:\\dev\\app'))
+check('绝对路径去掉末尾分隔符', normalizeProjectPath(P.appTrail, P.elsewhere) === P.app, normalizeProjectPath(P.appTrail, P.elsewhere))
+if (WIN) {
+  // 盘符大小写折叠只对 Windows 路径有意义(POSIX 上 `c:` 是合法但**不同**的名字)。
+  check('盘符统一大写', normalizeProjectPath('c:\\dev\\app', 'C:\\x') === 'C:\\dev\\app', normalizeProjectPath('c:\\dev\\app', 'C:\\x'))
+  check('折叠 . 与 ..', normalizeProjectPath('D:\\dev\\app\\..\\app', 'C:\\x') === 'D:\\dev\\app', normalizeProjectPath('D:\\dev\\app\\..\\app', 'C:\\x'))
+} else {
+  check('折叠 . 与 ..', normalizeProjectPath('/srv/dev/app/../app', '/srv/x') === '/srv/dev/app', normalizeProjectPath('/srv/dev/app/../app', '/srv/x'))
+}check('相对路径按 base 解析', normalizeProjectPath('sub', P.app) === join(P.app, 'sub'), normalizeProjectPath('sub', P.app))
+check('相对路径按 base 解析(带 ..)', normalizeProjectPath(P.appParent, P.app) === P.other, normalizeProjectPath(P.appParent, P.app))
+check('projectScopeKey 形状', projectScopeKey(P.app) === `project:${P.app}`, projectScopeKey(P.app))
 
 // ── scope 决策 ──────────────────────────────────────────────────
 console.log('\n[2] scope 决策')
-const PROJECT = 'D:\\dev\\proj'
+const PROJECT = P.proj
 const handlers = createTools({
   store: new FakeStore(),
   config: { projectBasePath: PROJECT, defaultSaveScope: 'global' },
@@ -121,17 +155,17 @@ r = await runTool(handlers, 'memory_save', { content: '项目作用域测试', s
 check('memory_save scope=project → 当前项目', r.structuredContent.scope === projectKey, `scope=${r.structuredContent.scope}`)
 
 // memory_save path= → project:<绝对路径>
-r = await runTool(handlers, 'memory_save', { content: 'path 作用域测试', path: 'D:\\dev\\other' })
-check('memory_save path= → project:<绝对路径>', r.structuredContent.scope === 'project:D:\\dev\\other', `scope=${r.structuredContent.scope}`)
+r = await runTool(handlers, 'memory_save', { content: 'path 作用域测试', path: P.other })
+check('memory_save path= → project:<绝对路径>', r.structuredContent.scope === `project:${P.other}`, `scope=${r.structuredContent.scope}`)
 
 // path 归一化:同一目录不同写法必须落到同一个 scope
-r = await runTool(handlers, 'memory_save', { content: 'path 归一化 A', path: 'D:\\dev\\other\\' })
+r = await runTool(handlers, 'memory_save', { content: 'path 归一化 A', path: P.otherTrail })
 const scopeA = r.structuredContent.scope
-r = await runTool(handlers, 'memory_save', { content: 'path 归一化 B', path: 'd:\\dev\\other' })
+r = await runTool(handlers, 'memory_save', { content: 'path 归一化 B', path: P.otherAlt })
 check('同一目录的不同写法归一到同一个 scope', scopeA === r.structuredContent.scope, `${scopeA} vs ${r.structuredContent.scope}`)
 
 // path + scope='global' → 冲突
-r = await runTool(handlers, 'memory_save', { content: '冲突测试', path: 'D:\\dev\\other', scope: 'global' })
+r = await runTool(handlers, 'memory_save', { content: '冲突测试', path: P.other, scope: 'global' })
 check('path + scope=global → PATH_SCOPE_CONFLICT', r.isError === true && r.structuredContent.code === 'PATH_SCOPE_CONFLICT', r.content[0].text)
 
 // ── 幂等 ────────────────────────────────────────────────────────
