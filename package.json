@@ -1,0 +1,51 @@
+{
+  "name": "dsh-memory-mcp",
+  "version": "0.1.0",
+  "description": "把 @restregular/dsh-memory 的记忆库暴露成独立 MCP 服务，让 Trae / WorkBuddy 等任意 MCP 客户端与 DSH 共用同一份长期记忆（JSONL + 本地向量）。",
+  "type": "module",
+  "bin": {
+    "dsh-memory-mcp": "./src/index.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./store": "./src/store.js",
+    "./lock": "./src/lock.js",
+    "./scoring": "./src/scoring.js",
+    "./scope": "./src/scope.js",
+    "./scope-names": "./src/scope-names.js",
+    "./vector": "./src/vector.js",
+    "./tools": "./src/tools.js",
+    "./server": "./src/server.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "third-party-notices.md"
+  ],
+  "scripts": {
+    "selftest": "node scripts/selftest-mcp.mjs",
+    "selftest:store": "node scripts/selftest.mjs",
+    "selftest:tools": "node scripts/selftest-tools.mjs",
+    "selftest:protocol": "node scripts/selftest-protocol.mjs",
+    "selftest:vector": "node scripts/selftest-vector.mjs",
+    "selftest:vector-e2e": "node scripts/selftest-vector-e2e.mjs",
+    "test": "node scripts/selftest-mcp.mjs && node scripts/selftest.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "memory",
+    "dsh",
+    "deepseek-harness",
+    "trae",
+    "workbuddy"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
+  }
+}

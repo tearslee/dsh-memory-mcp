@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.DS_Store
+
+# 验收脚本在真实 storeDir 上跑，会留下锁文件与向量服务日志
+.locks/
+llama-server*.log
+llama-server*.pid
+
+# 打包/临时产物
+.verify/
+dist-npm/
+*.tgz
