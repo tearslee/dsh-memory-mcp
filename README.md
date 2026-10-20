@@ -2,6 +2,10 @@
 
 > **让 DSH 的长期记忆跨 IDE 共享 —— Trae / WorkBuddy / 任何支持 MCP 的 agent 都能读能写同一份记忆。**
 
+> 🤖 **给 AI agent 的入口**:如果你是 agent 而不是人,先读 [`AGENTS.md`](./AGENTS.md)(动手前必须知道的事实与不变量);
+> 需要让别的 agent/工具发现本仓库,用 [`llms.txt`](./llms.txt)。
+> 本文是写给人的完整说明,可以按需跳读。
+
 [`@restregular/dsh-memory`](https://github.com/RestRegular/dsh-memory) 是一个**只服务于 DeepSeek Harness 的插件**:
 它的记忆库、召回注入、管理面板都长在宿主里,**离开 DSH 就完全用不上**。
 
@@ -15,7 +19,7 @@
        │                  │                  │
        └──────────────────┼──────────────────┘
                           ▼
-              D:/dev/.dsh-memory-store
+              <store-dir>（两边必须配成同一个）
               global.jsonl + projects/<sha1>.jsonl
                     + .vec 向量边车
 ```
@@ -56,8 +60,8 @@
 {
   "mcpServers": {
     "dsh-memory": {
-      "command": "C:\\...\\node.exe",
-      "args": ["D:\\dev\\dsh-memory-mcp\\src\\index.js", "--store-dir", "D:\\dev\\.dsh-memory-store"]
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["C:\\path\\to\\dsh-memory-mcp\\src\\index.js", "--store-dir", "C:\\Users\\me\\.dsh-memory-store"]
     }
   }
 }
@@ -83,7 +87,7 @@
 | **本 MCP 服务** | **IDE 的 MCP 配置** | **不依赖 DSH** |
 | `llama-server` 向量服务 | 各自 spawn(插件用 8078,MCP 用 8199) | 互不干扰 |
 
-三者**只共用同一个数据目录** `D:/dev/.dsh-memory-store`,记忆因此互通 —— 仅此而已,
+三者**只共用同一个数据目录**(`<store-dir>`,DSH 插件与 MCP 必须配成同一个),记忆因此互通 —— 仅此而已,
 没有父子关系、没有共享进程。
 
 ### 生命周期
@@ -125,6 +129,7 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 
 - [安装](#安装)
 - [启动](#启动)
+- [命令行与退出码](#命令行与退出码)
 - [环境变量](#环境变量)
 - [五个工具](#五个工具)
 - [Trae / WorkBuddy 配置](#trae--workbuddy-配置)
@@ -133,66 +138,140 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 - [向量开关](#向量开关)
 - [已知限制](#已知限制)
 - [自测](#自测)
-
+- [面向 AI agent](#面向-ai-agent)
 ---
 
 ## 安装
 
+**要求 Node.js `>= 22.13.0`**(见 `package.json` 的 `engines`)。低版本会在锁层用到的新 API 上失败,
+而且报错信息不会告诉你"是 Node 太旧"—— 这是部署时第一道容易撞上的门槛。
+
+两种装法,任选一种:
+
 ```bash
-cd D:\dev\dsh-memory-mcp
+# ① 从源码(推荐:能跑完整自测)
+git clone https://github.com/tearslee/dsh-memory-mcp.git
+cd dsh-memory-mcp
 npm install
+
+# ② 作为依赖装进别的项目 / 全局(装完就能自证)
+npm install dsh-memory-mcp
+npx dsh-memory-mcp --version
 ```
 
-**依赖清单**(由本项目 `src/server.js` 引入):
+**依赖清单**:
 
 | 包 | 版本 | 用途 |
 | --- | --- | --- |
-| `@modelcontextprotocol/sdk` | `1.32.1` | MCP 协议实现(`Server` / `StdioServerTransport` / `Client`) |
+| `@modelcontextprotocol/sdk` | `1.32.1`(精确版本) | MCP 协议实现(`Server` / `StdioServerTransport` / `Client`) |
 
 存储层(`src/store.js` / `src/scoring.js` / `src/scope.js` / `src/scope-names.js` / `src/lock.js`)**零外部依赖**,只用 Node.js 内置模块。
+SDK 只在 `src/server.js` 里用到三行 import;其余 8 个文件对 SDK 一无所知。
 
-> `package.json` 由项目负责人统一维护,依赖只此一项。
+> `npm install` 后依赖树会变大(96 个包)是正常的 —— SDK 自带 `express` / `ajv` / `zod` 等传递依赖。
 
 ## 启动
 
 ```bash
-# 最简:用默认 store 目录(D:/dev/.dsh-memory-store),工作区 = 当前目录
+# 最简:store 用默认目录(~/.dsh-memory-store),工作区 = 当前目录
 node src/index.js
 
 # 指定工作区(决定 project 作用域)
-node src/index.js --project D:\dev\ruoyi-vue-pro\ruoyi-vue-pro
+node src/index.js --project D:\dev\my-app
 
-# 指定存储目录(与 DSH 插件共用)
+# 指定存储目录(**与 DSH 插件共用时必须显式给**,见下方警告)
 node src/index.js --store-dir D:\dev\.dsh-memory-store
 
 # 两者一起
 node src/index.js --project D:\dev\my-app --store-dir D:\dev\.dsh-memory-store
 ```
 
-启动参数:
+> ⚠️ **默认 storeDir 是 `~/.dsh-memory-store`,它是平台中立的,但不一定是你 DSH 在用的那个**。
+> `DEFAULT_STORE_DIR` 只保证"任何机器上都能跑起来",不保证"跑对了库"。真正要共用的是
+> **DSH 记忆插件的 `storeDir`**。两者不一致时服务一切正常,只是你看到的是另一份(空的)记忆库 ——
+> **这是本仓库最容易让人误判「没生效」的地方**。
+>
+> 用默认值启动时,stderr 会打一条显式提示:
+> ```
+> [dsh-memory-mcp] ℹ️  未指定 --store-dir / DSH_MEMORY_STORE_DIR,使用默认目录:C:\Users\me\.dsh-memory-store
+> [dsh-memory-mcp]    ⇒ 请确认它与 DSH 记忆插件的 storeDir **是同一个目录**,否则两边看到的是两份互不相通的记忆。
+> ```
+> 看到这条就说明你在用默认库。想确认对不对,最直接的办法是看那个目录里有没有 `global.jsonl`。
+
+启动参数(都支持 `--key value` 与 `--key=value` 两种写法):
 
 | 参数 | 说明 | 缺省 |
 | --- | --- | --- |
-| `--project <dir>` | 当前工作区目录(绝对或相对)。决定 `project` / `project:<路径>` 作用域。 | `DSH_MEMORY_PROJECT` → `process.cwd()` |
-| `--store-dir <dir>` | 记忆存储目录。 | `DSH_MEMORY_STORE_DIR` → `D:/dev/.dsh-memory-store` |
+| `--project <dir>` / `--project-dir <dir>` | 当前工作区目录(绝对或相对)。决定 `project` / `project:<路径>` 作用域。 | `DSH_MEMORY_PROJECT` → `process.cwd()` |
+| `--store-dir <dir>` / `--store <dir>` | 记忆存储目录。 | `DSH_MEMORY_STORE_DIR` → `~/.dsh-memory-store` |
+| `-h` / `--help` | 打印用法后退出(0)。 | — |
+| `-v` / `--version` | 打印版本后退出(0)。 | — |
 
 进程是 **stdio 传输**:stdout 只输出 MCP 协议消息,**所有日志走 stderr**。
 `SIGINT` / `SIGTERM` 会优雅退出,并且**只终止自己拉起的** llama-server(复用的外部服务原样保留)。
+
+## 命令行与退出码
+
+CLI 是**自描述**的,不需要读源码就能查用法:
+
+```bash
+$ node src/index.js --help      # 打到 stdout,exit 0
+$ node src/index.js --version
+dsh-memory-mcp 0.1.0
+```
+
+`--help` / `--version` 有两个刻意的性质:
+
+- **不加载 MCP SDK** —— 所以 `node_modules` 没装、依赖缺失时,帮助照样能打出来。
+  这是部署排障的第一步("先确认我参数写对没")。
+- **不碰磁盘** —— 不建 store 目录、不探活向量后端。用一个不存在的 `--store-dir` 跑 `--help`,
+  跑完那个路径仍然不存在。
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 正常退出(`--help` / `--version`;服务在 stdin 关闭后也以 0 退出) |
+| `1` | 启动失败(store 目录不可用、依赖缺失等),会打印可操作的中文提示 |
+| `2` | 参数错误(未知参数、参数缺值),**不会启动服务、不碰 store** |
+
+两条容易踩的规则:
+
+- **未知参数不再被静默忽略**。`--store_dir`、`--storedir`、`--storeD` 这类笔误以前会让服务
+  悄悄回退到默认 store(在别人机器上等于写到一个莫名其妙的目录),现在一律 exit 2 并指出是哪个参数写错了。
+- **flag 缺值同样报错**。`--store-dir` 后面什么都没有、或紧跟另一个 `--xxx`,都算缺值 ——
+  不会把 `--help` 当成目录名吃掉。
+
+启动失败时给的是可操作的中文诊断,不是 Node 裸栈:
+
+```
+[dsh-memory-mcp] ❌ 启动失败:记忆存储目录不可用:Q:\nope\store
+[dsh-memory-mcp]    ⇒ 原因:盘符 Q: 不存在(这台机器上没有这个盘)
+[dsh-memory-mcp]    ⇒ 改 --store-dir(或环境变量 DSH_MEMORY_STORE_DIR)指向一个已存在且可写的目录;默认是 C:\Users\me\.dsh-memory-store
+[dsh-memory-mcp]    原始错误:ENOENT ENOENT: no such file or directory, mkdir 'Q:\nope\store\projects'
+```
+
+需要完整调用栈时设 `DSH_MEMORY_DEBUG=1`。已覆盖的诊断:盘符不存在、父目录不存在、路径已存在且是个文件、
+无写入权限、缺依赖(`npm install` 提示)。
 
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `DSH_MEMORY_PROJECT` | `process.cwd()` | 当前工作区目录,等价于 `--project`。 |
-| `DSH_MEMORY_STORE_DIR` | `D:/dev/.dsh-memory-store` | 存储目录,等价于 `--store-dir`。 |
-| `DSH_MEMORY_SCOPE_ALL` | `false` | `true` ⇒ `memory_save` 省略 scope 时默认写 **project** 而不是 **global**。 |
-| `DSH_MEMORY_VECTOR` | 开启 | `off`(或 `0`/`false`/`no`)⇒ 完全关闭向量,退化为纯词法检索。 |
-| `DSH_MEMORY_EMBED_ENDPOINT` | — | 直接指定已有的 embedding 服务(如 `http://127.0.0.1:8078`)。**设了它就永不 spawn 进程。** |
-| `DSH_MEMORY_EMBED_EXE` | `D:\dev\llamacpp\llama-server.exe` | llama-server 可执行文件。 |
-| `DSH_MEMORY_EMBED_MODEL` | `D:\dev\models\Qwen3-Embedding-0.6B-Q8_0.gguf` | gguf 模型文件。 |
+| `DSH_MEMORY_STORE_DIR` | `~/.dsh-memory-store` | 存储目录,等价于 `--store-dir`。 |
+| `DSH_MEMORY_SCOPE_ALL` | `false` | `1`/`true`/`yes`/`on` ⇒ `memory_save` 省略 scope 时默认写 **project** 而不是 **global**。 |
+| `DSH_MEMORY_VECTOR` | 开启 | `off`(或 `0`/`false`/`no`/`disabled`)⇒ 完全关闭向量,退化为纯词法检索。 |
+| `DSH_MEMORY_EMBED_ENDPOINT` | — | 直接指定已有的 embedding 服务(如 `http://127.0.0.1:8078`)。**设了它就永不 spawn 进程,也永不杀进程。** |
+| `DSH_MEMORY_EMBED_EXE` | `D:\dev\llamacpp\llama-server.exe` ⚠️ | llama-server 可执行文件。**默认值是作者本机路径,换机器必须设。** |
+| `DSH_MEMORY_EMBED_MODEL` | `D:\dev\models\Qwen3-Embedding-0.6B-Q8_0.gguf` ⚠️ | gguf 模型文件。**同上。** |
 | `DSH_MEMORY_EMBED_PORT` | `8199` | 端口(避开 DSH 的 8078,两者可共存)。 |
 | `DSH_MEMORY_EMBED_THREADS` | `6` | llama-server 线程数。 |
 | `DSH_MEMORY_EMBED_POOLING` | 按模型推断 | 池化方式。**换模型时务必确认这一项**(见下)。 |
+| `DSH_MEMORY_DEBUG` | 关闭 | `1` ⇒ 启动失败时额外打印完整调用栈(默认只打一行原始错误)。 |
+
+> ⚠️ 向量相关的三个默认值(`EXE` / `MODEL`)是**作者本机的绝对 Windows 路径**。
+> 别人 clone 后直接跑,向量后端会 spawn 失败 —— 但服务**不会崩**,只是静默退化为纯词法检索。
+> 换机器时三选一:设 `DSH_MEMORY_EMBED_EXE` + `DSH_MEMORY_EMBED_MODEL`;或用
+> `DSH_MEMORY_EMBED_ENDPOINT` 指向已有的 embedding 服务;或直接 `DSH_MEMORY_VECTOR=off` 关掉向量。
 
 ## 五个工具
 
@@ -306,13 +385,55 @@ node src/index.js --project D:\dev\my-app --store-dir D:\dev\.dsh-memory-store
 | `memory_get` | `{ ok, count, records: [...], missing: [...] }` |
 | `memory_forget` | `{ ok, deleted, ids: [...] }` |
 
-出错时返回 `isError: true` + `{ ok: false, code, message }`,`code` 取值:
-`CONTENT_EMPTY` `IMPORTANCE_RANGE` `KIND_INVALID` `TOPK_RANGE` `LIMIT_RANGE` `IDS_EMPTY`
-`TARGET_REQUIRED` `TARGET_AMBIGUOUS` `SCOPE_INVALID` `SCOPE_NOT_WRITABLE`
-`PATH_SCOPE_CONFLICT` `PATH_INVALID`。**不抛栈**,文本里写明怎么改。
+出错时返回 `isError: true` + `{ ok: false, code, message }`。**不抛栈**,文本里写明怎么改。
+
+参数校验类错误码:
+
+| 错误码 | 触发点 |
+| --- | --- |
+| `CONTENT_EMPTY` | `memory_save` 的 `content` 为空或非字符串 |
+| `QUERY_EMPTY` | `memory_search` 的 `query` 为空或非字符串 |
+| `KIND_INVALID` | `kind` 不在六种之内(`memory_save` 与 `memory_list` 共用) |
+| `IMPORTANCE_RANGE` / `TOPK_RANGE` / `LIMIT_RANGE` / `IDS_EMPTY` | 对应数值越界,或 `ids` 是空数组 |
+| `TARGET_REQUIRED` / `TARGET_AMBIGUOUS` | `memory_forget` 的 `id` 与 `query` 都不给 / 都给 |
+| `PATH_INVALID` | `path` 是空串 |
+| `PATH_SCOPE_CONFLICT` | 同时给 `path` 和 `scope: global/session/all` |
+
+作用域类错误码:
+
+| 错误码 | 触发点 |
+| --- | --- |
+| `SCOPE_INVALID` | 作用域名不合法(含 `:` `/` `\` `..`、控制字符、超长、保留名) |
+| `SCOPE_NOT_WRITABLE` | 用 `all` 写;或 `memory_forget` 把 `all` 与 `query` 同用 |
+| `SCOPE_NAME_INVALID` / `SCOPE_NAME_TAKEN` | 别名本身非法 / 该别名已被**另一个路径**占用(来自 `scope-names.js`) |
+
+存储与兜底类错误码:
+
+| 错误码 | 触发点 |
+| --- | --- |
+| `LOCK_TIMEOUT` / `LOCK_RECURSION` | 取锁 10 秒超时 / 同进程对同一把锁递归加锁 |
+| `STORE_ERROR` | 存储层返回了无法识别的结果(适配层兜底) |
+| `UNKNOWN_TOOL` / `TOOL_ERROR` | 工具名不存在 / 任何未归类的异常 |
 
 > 注意 `memory_search` 的记录数组字段是 **`records`**(不是 `results`),与上游
 > `lib/tools/index.js` 的 `{ records: [...] }` 对齐。
+
+## 记忆在磁盘上长什么样
+
+```
+<store-dir>/
+├── global.jsonl                    ← scope 键 "global"
+├── global.vec                      ← 向量边车,首行 #qwen3-embedding-0.6b\t1024
+├── projects/<sha1(scope)>.jsonl    ← 其他任何 scope 键
+├── projects/<sha1(scope)>.vec
+├── scopes.json                     ← 作用域别名(只有登记过别名才存在)
+├── .locks/                         ← 每 scope 一个锁文件(sha1(scope).lock)
+├── llama-server-mcp.log            ← 自己 spawn 的向量后端日志(仅 spawn 过才存在)
+└── settings.json                   ← DSH 的注入设置(本 MCP **不读不写**)
+```
+
+**排查"记忆去哪了"时,就看这个目录里有没有 `global.jsonl`、以及 mtime 是不是刚刚。**
+`llama-server-mcp.log` 是排查"语义检索为什么不生效"的第一现场。
 
 ## Trae / WorkBuddy 配置
 
@@ -327,22 +448,23 @@ node src/index.js --project D:\dev\my-app --store-dir D:\dev\.dsh-memory-store
 
 配置文件:`%USERPROFILE%\.workbuddy\mcp.json`。
 
-### 本机实际使用的配置(两份格式完全相同)
+### 一份可直接改的模板
+
+下面把本机的绝对路径换成了占位符。**三个 ⚠️ 处必须换成你自己的**:
 
 ```json
 {
   "mcpServers": {
     "dsh-memory": {
-      "command": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\PhpWebStudy-Data\\env\\node\\node.exe",
+      "command": "C:\\Program Files\\nodejs\\node.exe",
       "args": [
-        "D:\\dev\\dsh-memory-mcp\\src\\index.js",
+        "C:\\path\\to\\dsh-memory-mcp\\src\\index.js",
         "--store-dir",
-        "D:\\dev\\.dsh-memory-store"
+        "C:\\Users\\me\\.dsh-memory-store"
       ],
       "env": {
-        "DSH_MEMORY_STORE_DIR": "D:\\dev\\.dsh-memory-store",
-        "DSH_MEMORY_EMBED_EXE": "D:\\dev\\llamacpp\\llama-server.exe",
-        "DSH_MEMORY_EMBED_MODEL": "D:\\dev\\models\\Qwen3-Embedding-0.6B-Q8_0.gguf",
+        "DSH_MEMORY_EMBED_EXE": "C:\\path\\to\\llama-server.exe",
+        "DSH_MEMORY_EMBED_MODEL": "C:\\path\\to\\Qwen3-Embedding-0.6B-Q8_0.gguf",
         "DSH_MEMORY_EMBED_POOLING": "last"
       }
     }
@@ -350,16 +472,21 @@ node src/index.js --project D:\dev\my-app --store-dir D:\dev\.dsh-memory-store
 }
 ```
 
-> `command` 写的是 **node 的绝对路径**而不是 `node` —— IDE 拉起 MCP 时继承的 PATH 常常不含 node,
+> `command` 写**node 的绝对路径**而不是 `node` —— IDE 拉起 MCP 时继承的 PATH 常常不含 node,
 > 写 `node` 会报「不是内部或外部命令」。
+>
+> `--store-dir` 必须**指向 DSH 插件在用的那个目录**,否则两边看不到同一份记忆。
+>
+> 不想配向量后端的话,把 `env` 整段删掉、改成 `"DSH_MEMORY_VECTOR": "off"`,只保留词法检索 ——
+> 记忆照样能读写,只是没有语义召回。
 
 ### 关于 `--project`:全局配置里**故意不写**
 
 > ⚠️ 上面这份配置里**没有** `--project`,这是刻意的。
 >
 > MCP 配置是**全局**的(一个配置文件服务所有项目),而 `--project` 是单一值。
-> 一旦写死成 `D:\dev\ruoyi-vue-pro\ruoyi-vue-pro`,那么你在 Trae 里打开**任何其它项目**时,
-> 它的 `project` 作用域都会错误地落到 ruoyi-vue-pro 那个目录 —— 所有项目的记忆混进同一个桶。
+> 一旦写死成某个具体项目,那么你在 Trae 里打开**任何其它项目**时,
+> 它的 `project` 作用域都会错误地落到那个目录 —— 所有项目的记忆混进同一个桶。
 >
 > 不写 `--project` 时,服务退回 `process.cwd()`。**正确用法是按项目单独配一份**:
 >
@@ -370,21 +497,39 @@ node src/index.js --project D:\dev\my-app --store-dir D:\dev\.dsh-memory-store
 >   但 `global` 那部分始终正确 —— 而跨 IDE 共享的本来就是 `global`。
 > - 想让保存默认落到项目而不是 global,加 `"DSH_MEMORY_SCOPE_ALL": "true"`。
 
-**如果 IDE 不支持 `env` 字段**,把环境变量写进 `command` 的调用脚本里,或者直接省略
-`--store-dir`(默认就是 `D:/dev/.dsh-memory-store`)。
+**如果 IDE 不支持 `env` 字段**,把环境变量写进 `command` 的调用脚本里。
+别指望"省略 `--store-dir` 就行" —— 默认目录是 `~/.dsh-memory-store`,与你的 DSH storeDir 多半不是同一个。
+
+### 接好之后先自测一遍
+
+不用真的让 agent 去调工具,先确认进程能被拉起来:
+
+```bash
+# CLI 层(不建连接):确认参数/版本/路径都对
+node <repo>/src/index.js --version
+node <repo>/src/index.js --help
+
+# 真正起一次服务,看 stderr 首几行(stdio 型服务在 IDE 外跑需要喂一个 initialize)
+echo {} | node <repo>/src/index.js --store-dir <你的目录>
+```
+
+首三行 stderr 会打印**实际生效**的 `store-dir` / `project` / 默认保存作用域 ——
+「记忆写错地方」90% 在这一屏就能看出来。
 
 ## 与 DSH 共存的设计
 
 **存储目录相同,进程独立,互不干扰。**
 
 ```
-D:/dev/.dsh-memory-store/
+<store-dir>/
 ├── global.jsonl                    ← scope 键 "global"
 ├── global.vec                      ← 向量边车,首行 #qwen3-embedding-0.6b\t1024
 ├── projects/<sha1(scope)>.jsonl    ← 其他任何 scope 键
 ├── projects/<sha1(scope)>.vec
-├── scopes.json                     ← 作用域别名
-└── settings.json                   ← DSH 的注入设置(MCP 不读)
+├── .locks/<sha1(scope)>.lock       ← 每个 scope 一把独占锁
+├── scopes.json                     ← 作用域别名(登记过别名才存在)
+├── llama-server-mcp.log            ← 自己 spawn 的向量后端日志(仅 spawn 过才存在)
+└── settings.json                   ← DSH 的注入设置(MCP 不读不写)
 ```
 
 - **作用域键 → 文件名**:`global` → `global.jsonl`;其余 → `projects/sha1(scope).jsonl`
@@ -562,43 +707,76 @@ DSH_MEMORY_VECTOR=off node src/index.js
 ```bash
 npm install
 
-# 完整 MCP 协议自测(主脚本)
-node scripts/selftest-mcp.mjs
+# 一条命令跑主力三项(约 7 秒,都不碰真实 store)
+npm test
 
-# 存储层并发自测(真实多进程)
-node scripts/selftest.mjs
-
-# 其它分层自测
-node scripts/selftest-tools.mjs       # 工具层:参数校验 / scope 决策 / 渲染(用内存版假 store)
-node scripts/selftest-protocol.mjs    # MCP 协议层:握手 / tools/list / tools/call(用内存版假 store)
+# 逐项跑
+node scripts/selftest-cli.mjs          # CLI 契约:--help/--version/未知参数/退出码/启动失败诊断/配置解析
+node scripts/selftest-mcp.mjs          # 完整 MCP 协议端到端(真起 stdio server)
+node scripts/selftest.mjs              # 存储层并发(真 fork 多进程)
+node scripts/selftest-tools.mjs        # 工具层:参数校验 / scope 决策 / 渲染(内存版假 store)
+node scripts/selftest-protocol.mjs     # 协议层:握手 / tools/list / tools/call(内存版假 store)
 node scripts/selftest-vector.mjs       # 向量后端:配置 / 探活 / 熔断 / 生命周期
 node scripts/selftest-vector-e2e.mjs   # 向量端到端:写 .vec 边车 + 语义召回
 
-# 验收测试
-node scripts/acceptance-real.mjs      # 端到端打真实 storeDir(只写/只删自己造的记录)
-node scripts/acceptance-coexist.mjs   # 与「上游式无锁写者」并存的实测数据
-node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(需先确保 8078/8199 无占用)
+# 验收测试(会碰真实 store,除非你明确要验"与真实库共存"否则别跑)
+node scripts/acceptance-real.mjs       # 端到端打真实 storeDir(只写/只删自己造的记录)
+node scripts/acceptance-coexist.mjs    # 与「上游式无锁写者」并存的实测数据(用临时目录)
+node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(需 8078/8199 都空闲)
 ```
 
-| 脚本 | 覆盖 | 碰真实 store? |
-| --- | --- | --- |
-| `selftest-mcp.mjs` | 真实 stdio 握手、5 个工具的 schema、保存、检索、幂等、列表/按前缀取回、删除后不再召回、错误码、向量开关对比、落盘检查、stderr 日志 | 否 |
-| `selftest.mjs` | 单进程语义、**4 进程 × 20 条真并发**、外部追加不被抹除、跨进程锁(超时/陈旧锁/粒度)、`.vec` 边车、别名映射 | 否 |
-| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、schema 自检 | 否 |
-| `selftest-protocol.mjs` | 握手、tools/list、tools/call 正常/错误路径、stdout 纯净性 | 否 |
-| `selftest-vector.mjs` | 配置解析、探活、复用不 spawn、维度、L2 归一化、熔断退避、与 DSH 已存向量的空间兼容性 | 否 |
-| `selftest-vector-e2e.mjs` | 写 `.vec` 边车 → 读回 → 不同措辞的语义召回 | 否 |
-| `acceptance-real.mjs` | 对**真实** storeDir 跑完整协议:写入 → 磁盘可见 → 跨作用域读回 → 幂等 → 按前缀取回 → 删除 → 确认仍能读到 DSH 既有记忆 | **是**(只删自己造的) |
-| `acceptance-coexist.mjs` | 与复刻上游「内存快照+全量重写」的无锁写者并发,量化双向互毁的损失 | 否(临时目录) |
-| `acceptance-standalone.mjs` | **不开 DSH**:冷启动 → 自拉起向量后端 → 读写 → 语义召回 → 退出后无孤儿进程 | **是**(只删自己造的) |
+| 脚本 | 覆盖 | 检查项 | 碰真实 store? |
+| --- | --- | --- | --- |
+| `selftest-cli.mjs` | CLI 契约:`--help`/`--version` 的零副作用、未知参数 exit 2、启动失败诊断无裸栈、`parseArgs`/`resolveConfig` 纯函数 | **110** | 否 |
+| `selftest-mcp.mjs` | 真实 stdio 握手、5 个工具的 schema、保存、检索、幂等、列表/按前缀取回、删除后不再召回、错误码、向量开关对比、落盘检查、stderr 日志 | **40** | 否 |
+| `selftest.mjs` | 单进程语义、**4 进程 × 20 条真并发**、外部追加不被抹除、跨进程锁(超时/陈旧锁/粒度)、`.vec` 边车、别名映射 | **55** | 否 |
+| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、schema 自检 | **60** | 否 |
+| `selftest-protocol.mjs` | 握手、tools/list、tools/call 正常/错误路径、stdout 纯净性 | **18** | 否 |
+| `selftest-vector.mjs` | 配置解析、探活、复用不 spawn、维度、L2 归一化、熔断退避、与已存向量的空间兼容性 | **27** | **只读** |
+| `selftest-vector-e2e.mjs` | 写 `.vec` 边车 → 读回 → 不同措辞的语义召回 | **6** | 否 |
+| `acceptance-real.mjs` | 对**真实** storeDir 跑完整协议:写入 → 磁盘可见 → 跨作用域读回 → 幂等 → 按前缀取回 → 删除 → 确认仍能读到 DSH 既有记忆 | **13** | **是**(只删自己造的) |
+| `acceptance-coexist.mjs` | 与复刻上游「内存快照+全量重写」的无锁写者并发,量化双向互毁的损失 | **4** | 否(临时目录) |
+| `acceptance-standalone.mjs` | **不开 DSH**:冷启动 → 自拉起向量后端 → 读写 → 语义召回 → 退出后无孤儿进程 | **11** | **是**(只删自己造的) |
 
 `selftest-mcp.mjs` 用官方 SDK 的 `Client` + `StdioClientTransport` 起**自己**,
-真实走一遍完整的 MCP 协议握手(`initialize` → `tools/list` → `tools/call`),
-共 **40 项检查**。
+真实走一遍完整的 MCP 协议握手(`initialize` → `tools/list` → `tools/call`)。
 
-**除 `acceptance-real.mjs` 外,所有测试都在 `os.tmpdir()` 下的随机目录里跑**,
-`D:/dev/.dsh-memory-store` 一个字节都不会被碰(`selftest.mjs` 开头还有硬守卫,
-指向真实路径直接中止)。加 `--keep` 可以保留临时目录便于排查。
+### 跑测试前必须知道的几件事
+
+- **默认 `npm test` 不碰真实 store**:它 = `selftest-cli.mjs && selftest-mcp.mjs && selftest.mjs`。
+- **`acceptance-real.mjs` 与 `acceptance-standalone.mjs` 会写真实 store**。它们只删自己造的记录,
+  但如果你半路 Ctrl-C,可能会在 `global` 里留下几条测试记录。并且两者的路径**写死成作者本机路径**
+  (`D:/dev/.dsh-memory-store`、`D:/dev/dsh-memory-mcp/src/index.js`),换机器跑之前必须先改。
+- ⚠️ **真实 store 是「活的」**:只要 DSH 开着,它的记忆插件就在往里写(记录、`accessCount`、
+  `scopes.json` 别名),MCP 侧检索命中也会刷 `accessCount`。所以**不要拿文件 mtime 判断"测试有没有污染真实库"** ——
+  改动可能来自 DSH 自己的正常写入。要判断污染,看的是**内容**:`global.jsonl` 里有没有测试专用标记字符串。
+- **`acceptance-standalone.mjs` 的前置条件**:8078 与 8199 **都空闲**、且没有任何 `llama-server` 在跑 ——
+  它自己会检查,不满足直接 FAIL。它不是坏了,是环境不对。
+- **`selftest-vector.mjs` 会读**(不写)真实 store 里的 `global.vec` 做向量空间比对;
+  该文件不存在时自动跳过那几项。
+- **`selftest-vector-e2e.mjs` 在无可用向量后端时直接 `exit(0)` 跳过** ——
+  **退出码 0 不代表真的测过**。CI 里要当心这一点。
+- **`acceptance-coexist.mjs` 本身是 flaky 的**(实测 8 次里约 3 次 exit 1)。原因不是本项目的锁,
+  而是它故意复刻的那个"上游式写者"用固定 `${file}.tmp` 名 + rename,在 Windows 上并发 rename 同一个
+  `global.jsonl` 会 `EPERM`。**这恰好是"必须用唯一 tmp 名"那条不变量的活证据**。看到 FAIL 重跑一次即可,
+  不是回归。
+- 所有 selftest 都在 `os.tmpdir()` 下的随机目录里跑,`selftest.mjs` 开头还有硬守卫 ——
+  测试路径一旦命中真实 store 就直接中止。加 `--keep` 可以保留临时目录便于排查。
+
+## 面向 AI agent
+
+本仓库除了给人看的这份 README,还准备了两个 **agent 入口文件**:
+
+| 文件 | 给谁 | 内容 |
+| --- | --- | --- |
+| [`AGENTS.md`](./AGENTS.md) | **接手/修改本仓库的 coding agent** | 运行时事实、启动参数与环境变量全集、**14 条改代码前必须知道的不变量**、测试地图、故障 → 定位命令 |
+| [`llms.txt`](./llms.txt) | 想**发现**本仓库的 agent / 工具(遵循 [llms.txt](https://llmstxt.org/) 约定) | 项目简介、快速开始、工具清单、配置、不变量摘要、源码结构,全部绝对 URL |
+
+如果你正在用某个 agent 来部署这个服务,直接把 `AGENTS.md` 喂给它,比喂 README 更省 token 也更准 ——
+README 里有大量"与上游的差异"「实测数据」这类对部署没用的内容。
+
+MCP 服务本身也在**运行时**告诉客户端它能干什么:五个工具的 `description` 里写明了
+"什么时候该用我 / 默认 scope 是什么 / 出错怎么改",`initialize` 时不需要额外文档。
 
 ## 许可与第三方声明
 

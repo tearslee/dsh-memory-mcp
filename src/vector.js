@@ -232,6 +232,7 @@ export class VectorBackend {
       const ok = await this.probe()
       this.healthy = ok
       this.log(`vector: 使用外部端点 ${this.cfg.baseUrl}(health=${ok ? 'ok' : 'down'})`)
+      if (!ok) this.log('vector: 外部端点不可达,向量后端不可用,退化为纯词法检索')
       return ok ? 'external' : 'failed'
     }
     if (await this.probe()) {
@@ -274,14 +275,29 @@ export class VectorBackend {
         stdio: out === 'ignore' ? 'ignore' : ['ignore', out, out],
       })
     } catch (error) {
-      this.log(`vector: spawn 失败: ${error?.message ?? error}`)
+      // spawn 同步抛错(exe 路径非法等)—— 此时**还没有**任何进程,不能说"已启动"。
+      this.log(`vector: spawn 失败,向量后端不可用,退化为纯词法检索: ${error?.message ?? error}`)
+      this.log(`vector: ⇒ 核对 DSH_MEMORY_EMBED_EXE(默认 ${DEFAULTS.exe})是否真实存在`)
       this.#markFailure()
       return 'failed'
     }
+    // ⚠️ 顺序很重要:先登记 child/pid/spawned,再挂监听,最后**才**打"已启动"。
+    // 反过来写会得到 "已启动 pid=?" 后紧跟 ENOENT 的自相矛盾日志(旧版就是这样)。
     this.child = child
     this.pid = child.pid ?? null
     this.owned = true
     this.spawned = true
+    // ENOENT 之类是**异步** `error` 事件,不是 throw —— 这条路径必须有自己的日志,
+    // 否则 spawn 失败后只剩 120 秒空转,用户不知道发生了什么。
+    child.once('error', (error) => {
+      this.log(`vector: llama-server 启动失败(${this.cfg.exe}),向量后端不可用,退化为纯词法检索: ${error?.message ?? error}`)
+      this.log('vector: ⇒ 核对 DSH_MEMORY_EMBED_EXE / DSH_MEMORY_EMBED_MODEL 指向真实文件')
+      this.child = null
+      this.owned = false
+      this.healthy = false
+      this.spawned = false
+      this.readyPromise = null
+    })
     child.once('exit', () => {
       this.log('vector: llama-server 已退出')
       this.child = null
@@ -290,26 +306,32 @@ export class VectorBackend {
       this.spawned = false
       this.readyPromise = null
     })
-    child.once('error', (error) => {
-      this.log(`vector: llama-server 错误: ${error?.message ?? error}`)
-      this.child = null
-      this.owned = false
-      this.healthy = false
-      this.spawned = false
-      this.readyPromise = null
-    })
-    this.log(`vector: 已启动 llama-server pid=${this.pid ?? '?'} ${this.cfg.baseUrl}`)
+    if (this.pid) {
+      this.log(`vector: 已启动 llama-server pid=${this.pid} ${this.cfg.baseUrl}`)
+    } else {
+      // spawn 成功但拿不到 pid(重定向包装器),或 exe 不存在时 pid 还没分配 ——
+      // 一律照实说"pid 未分配",绝不打印 `pid=?` 假装启动成功。
+      this.log(`vector: 正在启动 llama-server(pid 未分配) ${this.cfg.baseUrl}`)
+    }
     return 'spawned'
   }
 
   /**
    * 等待后端就绪(轮询 /health)。
+   *
+   * 三个提前退出条件,缺一个就会空转满 timeout:
+   *   ① 后端不是我们拉起的、也没在拉起(`!child && !spawned`)—— 例如 spawn 已经
+   *      以异步 `error` 事件失败(child 被清成 null),旧版在这里会白等满 120 秒;
+   *   ② 自己拉起的子进程已经退出(exitCode 非 null);
+   *   ③ 探活成功。
+   *
    * @returns true 表示可用。
    */
   async waitUntilReady(timeoutMs = 60_000) {
     if (!this.cfg.enabled) return false
     if (this.cfg.external) return this.probe()
     const deadline = Date.now() + timeoutMs
+    let waitLogged = false
     while (Date.now() < deadline) {
       if (await this.probe(1500)) {
         this.healthy = true
@@ -317,7 +339,15 @@ export class VectorBackend {
         this.backoffMs = 1000
         return true
       }
+      // ① 没有可等的子进程了:spawn 失败(error 事件)或已被 stop()。
+      if (!this.child && !this.spawned) return false
+      // ② 子进程已经退出,再等也不会变健康。
       if (this.child && this.child.exitCode !== null) return false
+      // 模型加载动辄几十秒,期间日志静默会被误判成"卡死" —— 打一次进度提示。
+      if (!waitLogged) {
+        waitLogged = true
+        this.log(`vector: 正在等待 llama-server 加载模型(最多 ${Math.round(timeoutMs / 1000)} 秒)…`)
+      }
       await new Promise((r) => setTimeout(r, 400))
     }
     return false

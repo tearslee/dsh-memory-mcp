@@ -20,9 +20,21 @@
   },
   "files": [
     "src/",
+    "scripts/",
+    "AGENTS.md",
+    "llms.txt",
     "README.md",
     "third-party-notices.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tearslee/dsh-memory-mcp.git"
+  },
+  "homepage": "https://github.com/tearslee/dsh-memory-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/tearslee/dsh-memory-mcp/issues"
+  },
+  "author": "tearslee <tears.lee.cn@gmail.com>",
   "scripts": {
     "selftest": "node scripts/selftest-mcp.mjs",
     "selftest:store": "node scripts/selftest.mjs",
@@ -30,7 +42,8 @@
     "selftest:protocol": "node scripts/selftest-protocol.mjs",
     "selftest:vector": "node scripts/selftest-vector.mjs",
     "selftest:vector-e2e": "node scripts/selftest-vector-e2e.mjs",
-    "test": "node scripts/selftest-mcp.mjs && node scripts/selftest.mjs"
+    "selftest:cli": "node scripts/selftest-cli.mjs",
+    "test": "node scripts/selftest-cli.mjs && node scripts/selftest-mcp.mjs && node scripts/selftest.mjs"
   },
   "engines": {
     "node": ">=22.13.0"
