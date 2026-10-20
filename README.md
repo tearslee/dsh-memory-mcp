@@ -898,7 +898,7 @@ node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(纯词
 
 | 文件 | 给谁 | 内容 |
 | --- | --- | --- |
-| [`AGENTS.md`](./AGENTS.md) | **接手/修改本仓库的 coding agent** | 运行时事实、启动参数与环境变量全集、**14 条改代码前必须知道的不变量**、测试地图、故障 → 定位命令 |
+| [`AGENTS.md`](./AGENTS.md) | **接手/修改本仓库的 coding agent** | 运行时事实、启动参数与环境变量全集、**17 条改代码前必须知道的不变量**、测试地图(含平台差异与 flaky 说明)、故障 → 定位命令、CI 说明 |
 | [`llms.txt`](./llms.txt) | 想**发现**本仓库的 agent / 工具(遵循 [llms.txt](https://llmstxt.org/) 约定) | 项目简介、快速开始、工具清单、配置、不变量摘要、源码结构,全部绝对 URL |
 
 如果你正在用某个 agent 来部署这个服务,直接把 `AGENTS.md` 喂给它,比喂 README 更省 token 也更准 ——
