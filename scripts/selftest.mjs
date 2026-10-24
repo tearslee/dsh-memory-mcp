@@ -600,6 +600,48 @@ async function run() {
     assert(res.reason.includes('legacy'), `理由应指出旧格式,实际: ${res.reason}`)
   })
 
+  // ── 三段头(pooling)兼容 ──────────────────────────────────────────────
+  // 上游 0.10.0 起 `setVecIdentity(model, dims, pooling)` 会写 `#model\tdims\tpooling`,
+  // 而本包历史上只写两段。严格字符串比较会让**任一方向**升级后把对方的整份边车静默丢弃
+  // (语义检索退化成纯词法,不报错),所以校验改成与上游 identityMatches() 同语义。
+  await test('两段头 ↔ 三段头 互相接受(升级方向不丢向量)', () => {
+    const MODEL_NAME = 'qwen3-embedding-0.6b'
+    const rootI = newTempRoot('pooling-compat')
+    const twoSeg = new SharedStore(rootI, { vecIdentity: `${MODEL_NAME}\t${DIMS}` })
+    const threeSeg = new SharedStore(rootI, { vecIdentity: `${MODEL_NAME}\t${DIMS}\tlast` })
+    const rec = twoSeg.save({ scope: SCOPE_F, kind: 'fact', content: 'pooling 兼容' })
+    assertEqual(twoSeg.appendSidecar(SCOPE_F, rec.record.id, new Float32Array(DIMS)).appended, true, '两段身份应能写头')
+
+    // 上游升级后写的是三段头;本层若还是两段身份,必须照旧读出向量而不是丢弃。
+    const up = threeSeg.readSidecar(SCOPE_F)
+    assertEqual(up.discarded, false, '三段身份读两段头不应丢弃')
+    assertEqual(up.vectors.size, 1, '应读到 1 条向量')
+
+    // 反向:盘上是三段头,本层两段身份也必须接受(本包未升级的那一侧)。
+    // 数据行用**合法**的 DIMS 维编码 —— 长度不符的 base64 会被 decodeVec 跳过,
+    // 那样测的就不是身份兼容而是解码失败。
+    const encoded = Buffer.from(new Float32Array(DIMS).buffer).toString('base64')
+    writeFileSync(twoSeg.vecFileFor(SCOPE_F), `#${MODEL_NAME}\t${DIMS}\tlast\n${rec.record.id}\t${encoded}\n`, 'utf8')
+    const down = twoSeg.readSidecar(SCOPE_F)
+    assertEqual(down.discarded, false, '两段身份读三段头不应丢弃')
+    assertEqual(down.vectors.size, 1, '应读到 1 条向量')
+    assertEqual(twoSeg.appendSidecar(SCOPE_F, rec.record.id, new Float32Array(DIMS)).appended, true, '两段身份应能追加到三段头文件')
+  })
+
+  await test('两边都带 pooling 且不同时必须仍拒绝(向量空间不同)', () => {
+    const MODEL_NAME = 'qwen3-embedding-0.6b'
+    const rootJ = newTempRoot('pooling-diff')
+    const last = new SharedStore(rootJ, { vecIdentity: `${MODEL_NAME}\t${DIMS}\tlast` })
+    const rec = last.save({ scope: SCOPE_F, kind: 'fact', content: 'pooling 不同' })
+    last.appendSidecar(SCOPE_F, rec.record.id, new Float32Array(DIMS))
+    const cls = new SharedStore(rootJ, { vecIdentity: `${MODEL_NAME}\t${DIMS}\tcls` })
+    const side = cls.readSidecar(SCOPE_F)
+    assertEqual(side.discarded, true, 'pooling 不同应整体丢弃')
+    assertEqual(side.vectors.size, 0, '丢弃后向量为空')
+    const res = cls.appendSidecar(SCOPE_F, rec.record.id, new Float32Array(DIMS))
+    assertEqual(res.appended, false, 'pooling 不同应拒绝追加')
+  })
+
   await test('4 进程并发 append 向量,80 行全在(append 语义不互相覆盖)', async () => {
     const rootH = newTempRoot('vecconc')
     const storeH = new SharedStore(rootH, { vecIdentity: IDENTITY })

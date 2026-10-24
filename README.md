@@ -1,6 +1,6 @@
 # dsh-memory-mcp
 
-> **让 DSH 的长期记忆跨 IDE 共享 —— Trae / WorkBuddy / 任何支持 MCP 的 agent 都能读能写同一份记忆。**
+> **让 DSH 的长期记忆跨 IDE 共享 —— Trae / WorkBuddy / ZCode / 任何支持 MCP 的 agent 都能读能写同一份记忆。**
 
 > 🤖 **给 AI agent 的入口**:如果你是 agent 而不是人,先读 [`AGENTS.md`](./AGENTS.md)(动手前必须知道的事实与不变量);
 > 需要让别的 agent/工具发现本仓库,用 [`llms.txt`](./llms.txt)。
@@ -12,26 +12,26 @@
 本项目把同一套记忆能力抽出来做成一个**独立的 MCP (Model Context Protocol) 服务**:
 
 ```
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│  DSH 插件     │   │     Trae     │   │  WorkBuddy   │
-│ (原生面板)    │   │ (MCP 客户端)  │   │ (MCP 客户端)  │
-└──────┬───────┘   └──────┬───────┘   └──────┬───────┘
-       │                  │                  │
-       └──────────────────┼──────────────────┘
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│  DSH 插件     │   │     Trae     │   │  WorkBuddy   │   │    ZCode     │
+│ (原生面板)    │   │ (MCP 客户端)  │   │ (MCP 客户端)  │   │ (MCP 客户端)  │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │                  │
+       └──────────────────┴──────────────────┴──────────────────┘
                           ▼
               <store-dir>（两边必须配成同一个）
               global.jsonl + projects/<sha1>.jsonl
                     + .vec 向量边车
 ```
 
-**一处写入，三处可见。** 在 Trae 里记下的偏好，回到 DSH 继续对话时 agent 也能检索到。
+**一处写入，多处可见。** 在 Trae 里记下的偏好，回到 DSH 继续对话时 agent 也能检索到。
 
 ### 与上游的区别
 
 |  | `@restregular/dsh-memory` | 本项目 |
 | --- | --- | --- |
 | 形态 | DSH 插件(cordis loader entry) | 独立 MCP 服务(stdio) |
-| 可用宿主 | **仅 DSH** | Trae / WorkBuddy / 任何 MCP 客户端,**DSH 不需要开** |
+| 可用宿主 | **仅 DSH** | Trae / WorkBuddy / ZCode / 任何 MCP 客户端,**DSH 不需要开** |
 | 工具数 | 4 个(`memory_get` 定义了但漏注册,见 [上游 #2](https://github.com/RestRegular/dsh-memory/pull/2)) | 5 个(补上 `memory_get`) |
 | 管理面板 | ✅ 设置页「记忆」 | ❌ 面板仍建议在 DSH 里用 |
 | 自动召回注入 | ✅ 每轮自动注入 | ❌ 由调用方 agent 主动调 `memory_search` |
@@ -70,10 +70,11 @@
 启动后的链路:
 
 ```
-你打开 Trae / WorkBuddy
-  └─ IDE 读 mcp.json → spawn: node src/index.js --store-dir ...
-       ├─ 读磁盘上的 JSONL 记忆(不等 DSH)
-       └─ 探活 8199 → 没活 → 自己 spawn llama-server(向量后端)
+你打开 Trae / WorkBuddy / ZCode
+  └─ IDE 读 mcp.json(或 ZCode 的 ~/.zcode/cli/config.json)
+       → spawn: node src/index.js --store-dir ...
+            ├─ 读磁盘上的 JSONL 记忆(不等 DSH)
+            └─ 探活 8199 → 没活 → 自己 spawn llama-server(向量后端)
 ```
 
 **想在任务管理器里确认它**:Trae 开着时,能看到一个 `node.exe` 跑着
@@ -96,7 +97,7 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 
 | 场景 | MCP 服务 |
 | --- | --- |
-| Trae / WorkBuddy 需要调记忆工具时 | ✅ 由 IDE 拉起 |
+| Trae / WorkBuddy / ZCode 需要调记忆工具时 | ✅ 由 IDE 拉起 |
 | 只有 DSH 开着 | ❌ 不存在(DSH 走自己的插件,不经过 MCP) |
 | IDE 关闭 | ❌ 随之退出,不留孤儿进程 |
 
@@ -134,7 +135,7 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 - [验证你的部署](#验证你的部署)
 - [环境变量](#环境变量)
 - [五个工具](#五个工具)
-- [Trae / WorkBuddy 配置](#trae--workbuddy-配置)
+- [Trae / WorkBuddy / ZCode 配置](#trae--workbuddy--zcode-配置)
 - [与 DSH 共存的设计](#与-dsh-共存的设计)
 - [scope 语义(与 DSH 的差异)](#scope-语义与-dsh-的差异)
 - [向量开关](#向量开关)
@@ -177,7 +178,7 @@ npx dsh-memory-mcp --version
 
 | 包 | 版本 | 用途 |
 | --- | --- | --- |
-| `@modelcontextprotocol/sdk` | `1.32.1`(精确版本) | MCP 协议实现(`Server` / `StdioServerTransport` / `Client`) |
+| `@modelcontextprotocol/sdk` | `1.32.2`(精确版本) | MCP 协议实现(`Server` / `StdioServerTransport` / `Client`) |
 
 存储层(`src/store.js` / `src/scoring.js` / `src/scope.js` / `src/scope-names.js` / `src/lock.js`)**零外部依赖**,只用 Node.js 内置模块。
 SDK 只在 `src/server.js` 里用到三行 import;其余 8 个文件对 SDK 一无所知。
@@ -312,7 +313,7 @@ v26.3.0
 ② 部署自检 —— 三行绿色 `✅` 就是好的:
 ```
   ✅ Node 版本 26.3.0(要求 >= 20.3.0)
-  ✅ 依赖 @modelcontextprotocol/sdk 1.32.1
+  ✅ 依赖 @modelcontextprotocol/sdk 1.32.2
      file:///C:/path/to/dsh-memory-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/index.js
   ✅ 入口 src/index.js 存在
 ```
@@ -548,9 +549,10 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 **排查"记忆去哪了"时,就看这个目录里有没有 `global.jsonl`、以及 mtime 是不是刚刚。**
 `llama-server-mcp.log` 是排查"语义检索为什么不生效"的第一现场。
 
-## Trae / WorkBuddy 配置
+## Trae / WorkBuddy / ZCode 配置
 
-两个 IDE 的 MCP 配置格式一样(`mcpServers` 对象)。下面两段直接贴进对应配置文件即可。
+Trae 与 WorkBuddy 的 MCP 配置格式一样(`mcpServers` 对象)。ZCode 格式不同,单独一节。
+下面几段直接贴进对应配置文件即可。
 
 ### Trae
 
@@ -561,7 +563,54 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 
 配置文件:`%USERPROFILE%\.workbuddy\mcp.json`。
 
-### 一份可直接改的模板
+### ZCode
+
+配置文件:`%USERPROFILE%\.zcode\cli\config.json`。
+**ZCode 的键名与形状和上面两个不一样**:不是顶层 `mcpServers`,而是嵌套的 `mcp.servers`。
+少一层 `mcp` 会被 ZCode 当成「没配 MCP」而静默忽略。
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "dsh-memory": {
+        "type": "stdio",
+        "command": "C:\\Program Files\\nodejs\\node.exe",
+        "args": [
+          "C:\\path\\to\\dsh-memory-mcp\\src\\index.js",
+          "--store-dir",
+          "C:\\Users\\me\\.dsh-memory-store"
+        ],
+        "env": {
+          "DSH_MEMORY_EMBED_EXE": "C:\\path\\to\\llama-server.exe",
+          "DSH_MEMORY_EMBED_MODEL": "C:\\path\\to\\Qwen3-Embedding-0.6B-Q8_0.gguf",
+          "DSH_MEMORY_EMBED_POOLING": "last"
+        },
+        "timeoutMs": 60000
+      }
+    }
+  }
+}
+```
+
+ZCode 专属注意事项(均为本机对 `ZCode.exe` / `resources/glm/zcode.cjs` 实测求证):
+
+- **schema 是严格的**:多写一个不认识的键,**整个 server 会被丢掉**而不是被忽略。
+  可用键只有 `type` / `command` / `args` / `cwd` / `env` / `enabled` / `timeoutMs` /
+  `alwaysLoad` / `protocolVersion`。`command` 必须是**字符串**(写成数组 `["npx","-y",...]`
+  会让 ZCode 的设置页崩在 `command.trim is not a function`)。
+- **`cwd` 不用写**:不写时 ZCode 直接拿**当前工作区**当 MCP 进程的 cwd,
+  所以 `project` 作用域天然跟着工作区走 —— 这正好替代了下面「关于 `--project`」那节
+  在 Trae/WorkBuddy 里要靠项目级配置解决的问题。
+- **模板变量不展开**:`${...}` 只对插件自带的 MCP 生效,配置文件里要用**绝对路径**。
+- **改完要重启会话**(ZCode 每个工作区起一个 `app-server` 子进程,配置在它启动时读一次);
+  状态看 **设置 → MCP**,会显示 connected / failed 与工具数量。
+- **没有 `zcode mcp add` 命令**:ZCode 的 MCP 只能靠改这个 JSON 文件,或走设置页图形界面。
+- 兜底位置是 `%USERPROFILE%\.agents\mcp.json`(顶层 `mcpServers`),
+  但**仅当同一个作用域的 `.zcode` 里一个 MCP server 都没有时**才被读;
+  既然上面已经往 `.zcode` 写了,那份就不会生效。
+
+### 一份可直接改的模板(Trae / WorkBuddy)
 
 下面把本机的绝对路径换成了占位符。**三个 ⚠️ 处必须换成你自己的**:
 
@@ -628,6 +677,18 @@ echo {} | node <repo>/src/index.js --store-dir <你的目录>
 
 首三行 stderr 会打印**实际生效**的 `store-dir` / `project` / 默认保存作用域 ——
 「记忆写错地方」90% 在这一屏就能看出来。
+
+**ZCode 用户可以一条命令验完**:`scripts/probe-zcode-handshake.mjs` 会读你自己的
+`~/.zcode/cli/config.json`,**完全照 ZCode 的 spawn 方式**起进程(工作区当 cwd、
+`{...进程环境, ...配置里的 env}` 合并、stderr 走 pipe),然后 initialize →
+`tools/list` → 真调一次 `memory_search`:
+
+```bash
+node <repo>/scripts/probe-zcode-handshake.mjs [工作区绝对路径]
+```
+
+它打印握手耗时、工具清单和一次真实检索结果。**它只读不写记忆库**,
+所以对真实 store 跑是安全的(不像 `acceptance-*.mjs` 那样必须先指到临时目录)。
 
 ## 与 DSH 共存的设计
 

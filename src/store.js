@@ -27,11 +27,14 @@
  * 记录 JSONL 与 `.vec` 边车的字节格式**完全不变**,以便与 DSH 插件共用同一份 storeDir:
  *   - `<root>/global.jsonl` ← scope 键 'global'
  *   - `<root>/projects/<sha1(scope)>.jsonl` ← 其他任何 scope 键
- *   - `<root>/projects/<sha1(scope)>.vec` ← 边车,首行 `#<model>\t<dims>`,其后 `<id>\t<base64>`
+ *   - `<root>/projects/<sha1(scope)>.vec` ← 边车,首行 `#<model>\t<dims>[\t<pooling>]`,其后 `<id>\t<base64>`
  *   - `<root>/.locks/<sha1(scope)>.lock` ← 本层新增的锁文件(上游忽略未知目录)
  *
- * identity 头**只含 model 与 dims,不含 pooling** —— 与上游 `setVecIdentity(model, dims)`
- * 的 `${model}\t${dims}` 逐字节一致,否则 DSH 写的头会与本层校验的头对不上、整个边车被丢弃。
+ * identity 头**兼容两段与三段**:上游 0.10.0 起会写 `#model\tdims\tpooling`(pooling 是
+ * 向量空间的一部分,同一个模型换 `--pooling` 余弦只有 0.35),本包历史上只写 `#model\tdims`。
+ * 校验走 `identityMatches()`(与上游 0.16.2 逐条同语义):model+dims 必须相同,两边都有
+ * pooling 才严格比,任一侧缺 pooling 按兼容接受 —— 否则任一方向升级都会把对方的整份边车
+ * **静默丢弃**,语义检索退化成纯词法且不报错。
  */
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -249,12 +252,46 @@ export class SharedStore {
   }
 
   /**
-   * 声明产生内存中向量的 model+dims。**必须在第一次 readSidecar/appendSidecar 之前调用。**
+   * 声明产生内存中向量的 model+dims(+ 可选 pooling)。**必须在第一次 readSidecar/appendSidecar 之前调用。**
+   *
+   * `pooling` 只在**明确知道**时才写进身份头 —— 上游 0.10.0 起 `setVecIdentity(model, dims, pooling)`
+   * 会写 `model\tdims\tpooling` 三段头(同一个模型换 `--pooling` 就是另一个向量空间)。
+   * 本包不传 pooling 时仍写两段头,老版本上游照旧接受。
+   *
    * @param {string} model
    * @param {number} dims
+   * @param {string} [pooling]
    */
-  setVecIdentity(model, dims) {
-    this.vecIdentity = `${model}\t${dims}`
+  setVecIdentity(model, dims, pooling) {
+    this.vecIdentity = pooling !== undefined && pooling !== '' && pooling !== 'auto'
+      ? `${model}\t${dims}\t${pooling}`
+      : `${model}\t${dims}`
+  }
+
+  /**
+   * 边车身份对不对 —— 与上游 0.16.2 `ScopeStore.identityMatches()` **语义逐条一致**。
+   *
+   * 为什么不能再用 `declared !== this.vecIdentity` 严格比:
+   * 上游 0.10.0 起把 pooling 记进身份头(三段),而本包历史上只写两段。严格比的结果是
+   * **双向失效** —— 上游升级后重写出的三段头会被本层整体丢弃(语义检索静默退化成纯词法),
+   * 本层写出的两段头在"本层声明了三段"时又被拒写。两个方向的损失都不报错,只降级。
+   *
+   * 规则(缺 pooling 一律按兼容接受,两边都有才严格比):
+   *   - model 与 dims 必须相同,否则一定不是同一个向量空间;
+   *   - 两边都带 pooling → 必须相同(用错 --pooling 是**错的**向量,不只是过期的);
+   *   - 任一侧缺 pooling → 接受(老边车不能因为多记一个字段就全量作废)。
+   *
+   * @param {string} header 盘上的身份头(不含 `#`)
+   * @returns {boolean}
+   */
+  identityMatches(header) {
+    if (!this.vecIdentity) return true
+    if (!header) return false
+    const mine = this.vecIdentity.split('\t')
+    const theirs = header.split('\t')
+    if (mine[0] !== theirs[0] || mine[1] !== theirs[1]) return false
+    if (mine[2] !== undefined && theirs[2] !== undefined) return mine[2] === theirs[2]
+    return true
   }
 
   /** 锁超时配置透传(默认 10 秒,超时抛错而非死等)。 */
@@ -526,7 +563,7 @@ export class SharedStore {
       if (!trimmed) continue
       if (trimmed.startsWith('#')) {
         const declared = trimmed.slice(1)
-        if (this.vecIdentity && declared !== this.vecIdentity) {
+        if (!this.identityMatches(declared)) {
           this.onWarn(`vec: identity mismatch (${declared} != ${this.vecIdentity}); discarding sidecar for re-embed`)
           return { identity, model: parseModel(identity), dims: parseDims(identity), vectors: new Map(), discarded: true }
         }
@@ -589,7 +626,10 @@ export class SharedStore {
     return withLock(scopeKey, () => {
       mkdirSync(dirname(file), { recursive: true })
       const header = this.readVecHeader(file)
-      if (header && this.vecIdentity && header !== this.vecIdentity) {
+      // 兼容比较(见 identityMatches):上游三段头 / 本层两段头都能追加,只有
+      // model+dims 不同、或两边 pooling 明确不同时才拒写 —— 覆盖别人的向量是
+      // 无法凭本层重新计算的损失。
+      if (header && !this.identityMatches(header)) {
         return { appended: false, reason: `identity mismatch: sidecar has "${header}", current is "${this.vecIdentity}"` }
       }
       // 无头但**已有数据行** → 旧格式,来源不可知。不能直接补头(等于替别人的数据

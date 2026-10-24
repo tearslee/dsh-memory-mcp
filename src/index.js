@@ -442,6 +442,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // 而是在类型上就不可能出错(中间插一行 readSidecar 也无害)。
   let store
   try {
+    // 身份头**只写两段**（`model\tdims`），pooling 只用于校验、不写进头。
+    //
+    // 为什么不能跟着上游 0.10.0+ 写三段：上游 0.10.0 **之前**的版本（本机 0.8.0 实测
+    // store.js:234 `trimmed.slice(1) !== this.vecIdentity`）是**严格字符串比较**，
+    // 三段头会被它判成"身份不匹配"→ 整份边车丢弃 + 全量重嵌。也就是说本层若写三段，
+    // 就会把还没升级的 DSH 侧向量全部作废。反过来，上游 0.16.2 的 `identityMatches()`
+    // 对"盘上两段 / 我三段"是**兼容接受**的，所以写两段是**唯一两边都安全**的选择。
+    //
+    // 校验侧仍带上 pooling（见 store.js identityMatches）：等到盘上真出现三段头时，
+    // pooling 必须一致才放行 —— 用错 `--pooling` 是错的向量空间，不能靠相似度掩盖。
     store = new SharedStore(config.storeDir, { vecIdentity: vector.cfg.modelName + '\t' + vector.cfg.dims })
   } catch (error) {
     // 打上目标目录 + 「这个目录是不是默认值」,顶层 catch 才能给出**真正可执行**的诊断。

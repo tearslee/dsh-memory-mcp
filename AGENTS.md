@@ -4,7 +4,7 @@
 > 写给人的完整说明在 [README.md](./README.md);这里只写「动手前必须知道的事」。
 
 **这是什么**:把 `@restregular/dsh-memory` 的长期记忆库(JSONL + 本地向量)抽成**独立 stdio MCP 服务**,让
-DSH / Trae / WorkBuddy 等任意 MCP 客户端共用同一份 `storeDir`。五个工具:`memory_save` / `memory_search` /
+DSH / Trae / WorkBuddy / ZCode 等任意 MCP 客户端共用同一份 `storeDir`。五个工具:`memory_save` / `memory_search` /
 `memory_list` / `memory_get` / `memory_forget`。
 
 **数据落在哪**:纯文件,无数据库、无后台服务。`<storeDir>/global.jsonl`、`<storeDir>/projects/<sha1(scope)>.jsonl`、
@@ -32,7 +32,7 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | Node | `>=20.3.0` | `package.json` `engines`;真实下限由 `src/vector.js:366` 的 `AbortSignal.any()` 决定(20.3.0 才提供,20.2 及以前是 `undefined`)。原值 `>=22.13.0` 无源码依据,已下调 |
 | 模块 | `"type": "module"`,纯 ESM,无构建步骤 | `package.json` |
 | 入口 | `src/index.js`(`bin.dsh-memory-mcp`),有 shebang;`--help` / `--version` / 退出码 0/1/2 | `package.json` + `src/index.js` |
-| 唯一外部依赖 | `@modelcontextprotocol/sdk@1.32.1`(精确版本,非 `^`) | `package.json` |
+| 唯一外部依赖 | `@modelcontextprotocol/sdk@1.32.2`(精确版本,非 `^`) | `package.json` |
 | 依赖只用在哪 | 只有 `src/server.js` 三行 import(`server/index.js`、`server/stdio.js`、`types.js`) | grep `from '@modelcontextprotocol` |
 | 其余 8 个 src 文件 | 零外部依赖,只 import `node:*` 与彼此 | 同上 |
 | 版本号 | `0.1.0`,两处必须同步:`package.json` `version` 与 `src/server.js` `SERVER_VERSION` | `selftest-cli.mjs` 断言 |
@@ -182,6 +182,7 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | `acceptance-coexist.mjs` | 0.5s | 4 | 否(临时目录) | spawn `legacy-writer.mjs` 复刻上游无锁写者,量化双向丢数据。**已知 flaky,见下** |
 | `acceptance-real.mjs` | 数秒 | 18 | 需 `DSH_MEMORY_REAL_STORE` | 打**你指定**的 storeDir(未设环境变量则打印提示 `exit(0)` 跳过)。写入用 `path` 参数并**断言** scope 为 `project:<测试目录>`;结束按 id 删自己造的 |
 | `acceptance-standalone.mjs` | 最长 ~2min | 11 | 需 `DSH_MEMORY_REAL_STORE` | 入口从脚本自身位置推导(`scripts/..`),不再写死;向量后端未配 `DSH_MEMORY_EMBED_EXE`/`MODEL` 时相关小节标「跳过」 |
+| `probe-zcode-handshake.mjs` | <1s | 3 | **只读** | 读用户自己的 `~/.zcode/cli/config.json`,照 ZCode 的 spawn 方式(cwd=工作区、env 合并、stderr=pipe)起进程 → initialize → `tools/list` → 真调 `memory_search`。**不写记忆库**,所以对真实 store 安全 |
 
 注意:
 
@@ -239,11 +240,44 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 
 ---
 
+## 3.5 宿主契约:各 IDE 怎么拉起本服务(实测,2026-10-20)
+
+> 这一节记的是**宿主侧的事实**,不是本仓库的代码。改配置前先看这里,能省掉大量试错。
+
+| 宿主 | 配置文件 | 键路径 | 键形状 |
+| --- | --- | --- | --- |
+| Trae | `%APPDATA%\Trae CN\User\mcp.json` | 顶层 `mcpServers` | `{ name: { command, args, env } }` |
+| WorkBuddy | `%USERPROFILE%\.workbuddy\mcp.json` | 顶层 `mcpServers` | 同上 |
+| **ZCode** | `%USERPROFILE%\.zcode\cli\config.json` | **嵌套 `mcp.servers`** | `{ name: { type, command, args, env, timeoutMs } }` |
+
+**ZCode 的坑(全部对 `ZCode.exe` / `resources/glm/zcode.cjs` 求证过)**:
+
+1. **键路径不同**:写顶层 `mcpServers` 会被当成「没配 MCP」而**静默忽略**,不报错。
+2. **schema 严格**:zod `.strict()`,多一个不认识的键 ⇒ **整个 server 被丢掉**。
+   可用键:`type` `command` `args` `cwd` `env` `enabled` `timeoutMs` `alwaysLoad` `protocolVersion`。
+   `command` 必须是**字符串** —— 写成数组 `["npx","-y",...]` 会让设置页崩在 `command.trim is not a function`。
+3. **`cwd` 不要写**:不写时 ZCode 拿**当前工作区**当 MCP 进程的 cwd(`createTransport` 里
+   `cwd: t.cwd ? resolve(...) : a ?? this.workingDirectory`)。所以 `project` 作用域天然跟随工作区,
+   **不需要**像 Trae/WorkBuddy 那样额外配项目级文件。这是 ZCode 相对另外两个宿主的一个真实优势。
+4. **不展开 `${...}`**:模板变量只对插件自带的 MCP 生效,配置文件里必须写绝对路径。
+5. **没有 `zcode mcp add` 命令**:只能改 JSON 或走 **设置 → MCP** 图形界面。
+6. **改完要重启会话**:ZCode 每个工作区起一个 `app-server` 子进程,配置在它启动时读一次;
+   `~/.zcode/cli/log/*.jsonl` 里有 `mcp.server.connected` / `mcp.server.failed` / `mcp.tools.registered` 事件可查。
+7. **兜底文件** `~/.agents/mcp.json` 只在**同一作用域的 `.zcode` 里一个 MCP server 都没有时**才读。
+
+**端口共享**:ZCode 实例与 Trae/WorkBuddy 实例会**复用同一个 8199 向量后端**
+(`ensureReady()` 先探活,活着就复用、不接管生命周期)。实测本机 8199 由某个 MCP 实例 spawn,
+ZCode 侧起手时打的是 `vector: 复用已有服务 http://127.0.0.1:8199(不接管生命周期)`。
+所以**不要**给每个宿主配不同端口 —— 那只会白白多占一份 600MB 的模型内存。
+
+---
+
 ## 4. 故障 → 定位
 
 | 现象 | 先看什么 |
 | --- | --- |
 | 客户端工具列表为空 / 握手失败 / IDE 报 404 类错误 | `command` 是否为 node **绝对路径**(IDE 继承的 PATH 常不含 node)、`args` 是否指向真实的 `src/index.js`、stderr 有没有输出。stdio 型 MCP 没有端口可连 |
+| **ZCode 里看不到这个 server / 设置页里没有它** | 键路径必须是**嵌套的 `mcp.servers`**(不是顶层 `mcpServers`);zod `.strict()` ⇒ 多写一个不认识的键会让**整个 server 被丢掉**;`command` 必须是字符串不是数组。改完要**重启会话**。见 [3.5 宿主契约](#35-宿主契约各-ide-怎么拉起本服务实测2026-10-20) |
 | 8199 被占 / 连到了别人的向量服务 | `netstat -ano -p tcp \| findstr ":8199 "` 取 pid → `Get-Process -Id <pid>`;`curl -s http://127.0.0.1:8199/health`。**探活成功就复用**,所以「端口在监听」不代表是本进程拉起的 |
 | 记忆「没生效」:明明存了却搜不到 / 检索结果是空的 | **先看 stderr 首三行**里实际生效的 `store-dir`,再核对它是不是 DSH 插件的 `storeDir`。用默认目录启动时 `main()` 会打 `ℹ️ 未指定 --store-dir ...` 提示 —— 那条提示存在就说明你在用默认库,很可能不是 DSH 那一份 |
 | 检索结果忽然变差、没有语义命中 | 后端可能压根没起来:`<store-dir>/llama-server-mcp.log` 尾部;或 `.vec` 头被整体丢弃(stderr 里有 `identity mismatch` / `legacy sidecar without identity header` 警告) |

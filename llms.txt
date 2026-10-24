@@ -1,6 +1,6 @@
 # dsh-memory-mcp
 
-> 把 `@restregular/dsh-memory` 的长期记忆库(JSONL + 本地 `.vec` 向量边车)抽成独立的 **stdio MCP 服务**,让 DSH / Trae / WorkBuddy 等任意 MCP 客户端读写同一个 `storeDir`。五个工具:`memory_save` / `memory_search` / `memory_list` / `memory_get` / `memory_forget`。纯文件存储,无数据库、无独立服务进程。
+> 把 `@restregular/dsh-memory` 的长期记忆库(JSONL + 本地 `.vec` 向量边车)抽成独立的 **stdio MCP 服务**,让 DSH / Trae / WorkBuddy / ZCode 等任意 MCP 客户端读写同一个 `storeDir`。五个工具:`memory_save` / `memory_search` / `memory_list` / `memory_get` / `memory_forget`。纯文件存储,无数据库、无独立服务进程。
 
 仓库:https://github.com/tearslee/dsh-memory-mcp(公开,MIT 许可)
 
@@ -13,7 +13,7 @@
 
 ## Quick start
 
-- [安装](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#安装): 要求 Node `>= 20.3.0`(`AbortSignal.any()` 自 Node 20.3.0 起提供,是源码里的硬下限)。`git clone` + `npm install`,或 `npm install dsh-memory-mcp`。唯一外部依赖是 `@modelcontextprotocol/sdk@1.32.1`,存储层 8 个文件零外部依赖。
+- [安装](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#安装): 要求 Node `>= 20.3.0`(`AbortSignal.any()` 自 Node 20.3.0 起提供,是源码里的硬下限)。`git clone` + `npm install`,或 `npm install dsh-memory-mcp`。唯一外部依赖是 `@modelcontextprotocol/sdk@1.32.2`,存储层 8 个文件零外部依赖。
 - [启动](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#启动): `node src/index.js --store-dir <dir> --project <dir>`。默认 store 目录是平台中立的 `~/.dsh-memory-store`,但它**不一定是你 DSH 在用的那个** —— 与 DSH 共用记忆时必须显式传 `--store-dir` 指向 DSH 插件的 `storeDir`,否则两边是两份互不相通的库。
 - [package.json](https://github.com/tearslee/dsh-memory-mcp/blob/main/package.json): `engines.node >= 20.3.0`、`"type": "module"`(纯 ESM,无构建步骤)、`bin` 指向 `src/index.js`、`package-lock.json` 已提交(CI 用 `npm ci` 复现构建)。
 - [src/index.js](https://github.com/tearslee/dsh-memory-mcp/blob/main/src/index.js): bin 入口。`--project` / `--project-dir` / `--store-dir` / `--store` 四个 flag 的空格与等号两种写法都支持。
@@ -35,7 +35,7 @@
 - [环境变量](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#环境变量): `DSH_MEMORY_*` 变量表格,共 11 个(以 `src/index.js` + `src/vector.js` 为准)。
 - [src/vector.js](https://github.com/tearslee/dsh-memory-mcp/blob/main/src/vector.js): `resolveVectorConfig()` 是环境变量的唯一权威来源(端口 8199 / 线程 6 / 维度 1024 / `bge*`→`cls`、`nomic*`→`mean`、其余→`last`)。⚠️ `DEFAULTS.exe` 与 `DEFAULTS.model` 是**作者本机绝对路径**,换机器必须用环境变量覆盖或 `DSH_MEMORY_VECTOR=off`。
 - [向量开关](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#向量开关): `DSH_MEMORY_VECTOR=off` 退化为纯词法检索;探活成功就复用已有服务,不接管其生命周期。
-- [Trae / WorkBuddy 配置](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#trae--workbuddy-配置): 两份 `mcp.json` 示例,以及全局配置里为什么**故意不写** `--project`。
+- [Trae / WorkBuddy / ZCode 配置](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#trae--workbuddy--zcode-配置): 三份宿主配置示例(⚠️ ZCode 的键路径不同,是嵌套 `mcp.servers` 而非顶层 `mcpServers`),以及全局配置里为什么**故意不写** `--project`。
 - [scope 语义(与 DSH 的差异)](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#scope-语义与-dsh-的差异): 键空间、自定义名规则、以及 MCP 为什么默认写 `global` 而不是 `session`。
 
 ## Running & verification
