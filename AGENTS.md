@@ -105,7 +105,8 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 
 ### 工具层(`src/tools.js`,不 import MCP SDK —— 保持可单测)
 
-- `KINDS` 恰六种:`fact` / `decision` / `preference` / `procedure` / `note` / `rule`;`memory_save` 省略 `kind` ⇒ `note`。
+- `KINDS` 恰七种:`fact` / `decision` / `preference` / `procedure` / `note` / `rule` / `state`;`memory_save` 省略 `kind` ⇒ `note`;
+  `kind=state` 写入时默认带 `expiredAt = now + 7 天`(上游同默认),过期后检索/列表默认不返回、记录仍保留。
 - 数值边界:`topK` 默认 5、范围 1~20;`limit` 默认 50、范围 1~200;`memory_get.ids` 最多 50;`RECALL_N=30`(先取候选再截 topK)。
 - 打分:`hybrid = max(lexical, cosine)`(**不是**加权求和),再乘 `recency(30 天半衰期) × importanceFactor × accessBoost × (被取代 ? 0.3 : 1)`。
   词法地板 `global` 0.12 / 其余 0.10;只有弱命中(单字 CJK)时抬到 `max(floor, 0.25)`;向量 `minScore` 0.5。
@@ -119,10 +120,11 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | 错误码 | 触发点 |
 | --- | --- |
 | `CONTENT_EMPTY` / `QUERY_EMPTY` | `content` / `query` 非法或空(**两个不同码,README 只列了前者**) |
-| `KIND_INVALID` | `kind` 不在六种里(`memory_save` 与 `memory_list` 共用) |
+| `KIND_INVALID` | `kind` 不在七种里(`memory_save` 与 `memory_list` 共用) |
 | `IMPORTANCE_RANGE` / `TOPK_RANGE` / `LIMIT_RANGE` / `IDS_EMPTY` | 对应参数越界或空数组 |
 | `TARGET_REQUIRED` / `TARGET_AMBIGUOUS` | `memory_forget` 的 id 与 query 都不给 / 都给 |
 | `SCOPE_INVALID` | 作用域名不合法(含 `:`、`/`、`\`、`..`、控制字符、超长、保留名) |
+| `SUPERSEDES_UNKNOWN` / `SUPERSEDES_AMBIGUOUS` | `memory_save.supersedes` 的目标不在本条同作用域 / 短前缀命中多条 |
 | `SCOPE_NOT_WRITABLE` | 用 `all` 写;或 `memory_forget` 把 `all` 与 query 同用 |
 | `PATH_SCOPE_CONFLICT` | 同时给 `path` 与 `scope:"global"/"session"/"all"` |
 | `PATH_INVALID` | `path` 为空串 |
@@ -139,6 +141,10 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
    `id`(uuid v4)、`scope`、`kind`、`content`、`tags`、`source`、`createdAt`、`updatedAt`、`lastAccessedAt`、
    `accessCount`、`importance`,可选 `supersedes`、`expiredAt`。新增字段会被 `persist()` 全量重写进**所有**记录,
    等于替 DSH 也改写了一遍文件 —— 加字段前先确认上游读得动。
+   **`supersedes` 必须落盘完整 UUID**:上游 0.25.12 起按完整 id 精确判退役,8 位前缀会让旧记录永远不退役;
+   `resolveSupersedesToken()` 在写前解析,且目标必须与本条同作用域(上游同语义)。
+   `memory_search` / `memory_list` 默认隐藏退役(`supersededIds`)与过期(`expiredAt < now`)记录;
+   `memory_search` 的 `includeSuperseded` 是唯一回历史开关,`memory_get` 不受影响。
 2. **scope → 文件名映射不可改**(`scopeFileName()`):`global` → `global.jsonl`,**其余任何键** →
    `projects/<sha1(scope)>.jsonl`。锁文件同理:`<root>/.locks/<sha1(scope)>.lock`;`scopes.json` 用固定键
    `@@scopes.json`(整体一把锁)。
@@ -174,8 +180,8 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | --- | --- | --- | --- | --- |
 | `selftest-cli.mjs` | 2.3s | 115(Win)/114(POSIX) | 否 | CLI 契约:`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析。零副作用(缺依赖场景用 tmpdir 副本模拟) |
 | `selftest-mcp.mjs` | 1.1s | 40 | 否 | 真起 stdio server(SDK `Client` + `StdioClientTransport`),`--keep` 保留 tmpdir |
-| `selftest.mjs` | 3.5s | 55 | 否 | 真 fork 子进程(`--worker` 自己);开头 `assertNotRealStore()` 硬守卫,命中真实路径直接中止 |
-| `selftest-tools.mjs` | 0.06s | 60(Win)/59(POSIX) | 否 | 纯内存假 store,只 import `tools.js`/`scope.js` |
+| `selftest.mjs` | 3.5s | 57 | 否 | 真 fork 子进程(`--worker` 自己);开头 `assertNotRealStore()` 硬守卫,命中真实路径直接中止 |
+| `selftest-tools.mjs` | 0.06s | 84(Win)/83(POSIX) | 否 | 纯内存假 store,只 import `tools.js`/`scope.js` |
 | `selftest-protocol.mjs` | 0.4s | 18 | 否 | 内存假 store + 临时入口,验证 stdout 纯净性 |
 | `selftest-vector.mjs` | 0.35s | 27 | **只读** | 若 `D:\dev\.dsh-memory-store\global.vec` 存在会**读**它做向量空间比对;不写 |
 | `selftest-vector-e2e.mjs` | 0.6s | 6 | 否 | 用 tmpdir;无可用后端时**直接 `exit(0)` 跳过**(退出码 0 不代表测过) |
@@ -298,10 +304,10 @@ ZCode 侧起手时打的是 `vector: 复用已有服务 http://127.0.0.1:8199(�
 
 ```bash
 node scripts/selftest-cli.mjs        # 2.3s,CLI 契约 115 项(Windows)/114(POSIX)
-node scripts/selftest-tools.mjs      # 0.1s,参数/scope 决策 60 项(Win)/59(POSIX)
+node scripts/selftest-tools.mjs      # 0.1s,参数/scope 决策 84 项(Win)/83(POSIX)
 node scripts/selftest-protocol.mjs   # 0.4s,协议层 18 项
 node scripts/selftest-mcp.mjs        # 1.1s,端到端 40 项
-node scripts/selftest.mjs            # 3.5s,多进程并发 55 项
+node scripts/selftest.mjs            # 3.5s,多进程并发 57 项
 ```
 
 - `npm test` = `selftest-cli.mjs && selftest-mcp.mjs && selftest.mjs`。**从 npm 装进别的项目时也能跑**

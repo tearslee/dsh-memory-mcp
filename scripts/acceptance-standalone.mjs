@@ -250,7 +250,8 @@ try {
       arguments: { query: '不用打开主程序也能记录和检索', scope: 'all', topK: 10 },
     })
     const semRecs = sem.structuredContent?.records ?? []
-    const hit = semRecs.find((x) => x.content?.includes(marker))
+    // marker 在正文开头，摘要（前 160 字符）必然含它。
+    const hit = semRecs.find((x) => x.summary?.includes(marker))
     check(!!hit, '语义相近但措辞不同也能召回', hit ? `score=${hit.score}` : `命中 ${semRecs.length} 条但不含目标`)
   }
 

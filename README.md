@@ -401,10 +401,10 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 | `content` | string | ✅ | — | 一句自包含的陈述句,不依赖上下文也能读懂。 |
 | `scope` | string | | **global** | 作用域。省略时写入 `global`(见下方说明)。 |
 | `path` | string | | — | 工作区目录。给出后写入 `project:<解析后的绝对路径>`。 |
-| `kind` | enum | | `note` | `fact` / `decision` / `preference` / `procedure` / `note` / `rule`。 |
+| `kind` | enum | | `note` | `fact` / `decision` / `preference` / `procedure` / `note` / `rule` / `state`。`state` 默认 7 天 TTL。 |
 | `tags` | string[] | | `[]` | 自由标签。 |
 | `importance` | number | | — | `0~1`,越界报错。 |
-| `supersedes` | string | | — | 被本条取代的记忆 id。 |
+| `supersedes` | string | | — | 被本条取代的记忆 id(可写 8 位前缀,落盘前解析成完整 UUID;目标必须与本条同作用域)。 |
 
 > **默认 scope = `global`**,这是与 DSH 最重要的差异。
 > DSH 里 `tools.defaultScope` 是 `session`,但 Trae / WorkBuddy / DSH 各自的 session id 完全不同,
@@ -433,6 +433,7 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 | `query` | string | ✅ | — | 关键词或一句话描述。 |
 | `scope` | string | | **当前项目 + global** | `all` / `*` = 所有已发现作用域(只读)。 |
 | `topK` | number | | `5` | `1~20`。 |
+| `includeSuperseded` | boolean | | `false` | 默认隐藏已被取代的旧记录;`true` 时可回历史核对。 |
 
 输出示例:
 
@@ -450,7 +451,8 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 
 ### `memory_list`
 
-列出记忆,按最近更新优先。
+列出记忆,按最近更新优先。文本里同样只给**摘要**(与 `memory_search` 同口径),全文走 `memory_get`。
+与上游 0.26 同口径:已被取代的旧记录、已过期的 `state` 记录**默认不列出**(历史核对走 `memory_get`)。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -461,6 +463,7 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 ### `memory_get`
 
 按 id 取回具体内容(可写 8 位前缀)。**已知 id 时用它,不要为此再跑一次 search。**
+它是**唯一的全文出口** —— `memory_search` / `memory_list` 只给摘要,`content` 字段完整不截断。
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -494,10 +497,18 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 | 工具 | `structuredContent` 关键字段 |
 | --- | --- |
 | `memory_save` | `{ ok, id, deduped, scope, kind }` |
-| `memory_search` | `{ ok, count, scopes, records: [{ id, shortId, score, scope, kind, content, tags, importance, updatedAt }] }` |
+| `memory_search` | `{ ok, count, scopes, records: [{ id, shortId, score, scope, kind, contentLength, tags, importance, updatedAt }] }` |
 | `memory_list` | `{ ok, count, scopes, records: [...] }` |
-| `memory_get` | `{ ok, count, records: [...], missing: [...] }` |
+| `memory_get` | `{ ok, count, records: [{ ..., content }], missing: [...] }` |
 | `memory_forget` | `{ ok, deleted, ids: [...] }` |
+
+> 🔴 **`memory_search` / `memory_list` 不返回正文**,只在 `content[0].text` 里给**摘要**
+> (前 160 字符,空白折叠;超长加 `…`),并用 `contentLength` 告诉你原文多长。
+> 要全文就 `memory_get`。这不是为了省字符,而是旧版同一条正文会在一次调用里出现
+> **三遍**(`content[0].text` / `structuredContent.message` / `records[].content`),
+> 客户端把三处都塞进上下文,等于为一条记忆付三份 token —— 实测一次 3 条命中
+> 从 3888 字符降到 1671(**-57%**)。与上游 0.16.0 的行为一致。
+> `memory_get` 是唯一的全文出口,字段 `content` 完整不截断。
 
 出错时返回 `isError: true` + `{ ok: false, code, message }`。**不抛栈**,文本里写明怎么改。
 
@@ -507,9 +518,10 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 | --- | --- |
 | `CONTENT_EMPTY` | `memory_save` 的 `content` 为空或非字符串 |
 | `QUERY_EMPTY` | `memory_search` 的 `query` 为空或非字符串 |
-| `KIND_INVALID` | `kind` 不在六种之内(`memory_save` 与 `memory_list` 共用) |
+| `KIND_INVALID` | `kind` 不在七种之内(`memory_save` 与 `memory_list` 共用) |
 | `IMPORTANCE_RANGE` / `TOPK_RANGE` / `LIMIT_RANGE` / `IDS_EMPTY` | 对应数值越界,或 `ids` 是空数组 |
 | `TARGET_REQUIRED` / `TARGET_AMBIGUOUS` | `memory_forget` 的 `id` 与 `query` 都不给 / 都给 |
+| `SUPERSEDES_UNKNOWN` / `SUPERSEDES_AMBIGUOUS` | `memory_save.supersedes` 的目标不在本条同作用域 / 短前缀命中多条 |
 | `PATH_INVALID` | `path` 是空串 |
 | `PATH_SCOPE_CONFLICT` | 同时给 `path` 和 `scope: global/session/all` |
 
@@ -750,14 +762,18 @@ node <repo>/scripts/probe-zcode-handshake.mjs [工作区绝对路径]
 
 ### 与上游的版本关系
 
-本项目基于 **0.8.0** 的源码(本机已升级到 0.8.0,2026-10-20)。
+本项目基于 **0.8.0** 的源码,**2026-10-26 已按上游 0.26.0 核对并补齐行为差异**。
 
-**已核对 0.7.2 → 0.8.0 的差异**:只改动了 6 个文件(`client.js` / `panel.js` /
-`provider/apply.js` / `provider/index.js` / `package.json` / `README.md`),
-**`store.js` / `scoring.js` / `scope.js` / `scope-names.js` / `tools/*` 逐字节未变** ——
-所以本项目复用这些模块的部分**不受版本升级影响**,升级后实测验收 13/13 全绿。
+**0.8.0 → 0.26.0 中影响本项目的部分**:
 
-升级上游后仍建议比对这几个文件(它们才是与本项目耦合的部分)。
+- `store.js`:记录新增可选 `initial` / `triggers` 字段(`persist()` 原样保留,不丢);`kind=state` 默认 7 天 TTL;
+  `supersedes` 按**完整 id** 精确判定退役 —— 本项目写入前把 8 位前缀解析成完整 UUID,否则旧记录永远不会退役。
+- `scope.js`:作用域输入新增 `custom:<name>` 展示前缀归一(剥一层后按裸名严格校验)。
+- 工具层:`memory_search` 增加 `includeSuperseded`;`memory_search` / `memory_list` 默认隐藏退役与过期记录。
+- `.vec` 边车:上游 0.10.0 起写三段身份头(`model\tdims\tpooling`),本项目两段/三段都读、仍只写两段
+  (0.8.0 及更早是严格字符串比较,写三段会让旧版整份作废)。
+
+其余 `scoring.js` / 锁与文件格式未变;升级后实测验收脚本全绿。
 
 > 上游包**无法被直接 import**:`exports` 只声明了 `.` / `./client` / `./package.json`(没有 `lib/*` 子路径),
 > 裸包根入口又会因 `@deepseek-ai/cordis` peer 依赖而 `ERR_MODULE_NOT_FOUND`。
@@ -773,7 +789,7 @@ node <repo>/scripts/probe-zcode-handshake.mjs [工作区绝对路径]
 | `global` | 所有项目共享 |
 | `project:<绝对路径>` | 一个工作区 |
 | `session:<id>` | 一个会话(同一套 `projects/<sha1>` 文件体系) |
-| 自定义名 | 自由命名 |
+| 自定义名 | 自由命名(也接受展示名 `custom:<name>`,自动折成裸名) |
 
 **自定义名规则**:内部空白(含制表/换行)折叠为单个空格 → 转小写 → 长度 1~64 码点 →
 禁 `:` `/` `\` `..` 控制字符、禁纯点/空格组成的名字、禁保留名 `global`/`project`/`session`/`all`。
@@ -903,8 +919,8 @@ node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(纯词
 | --- | --- | --- | --- |
 | `selftest-cli.mjs` | CLI 契约:`--help`/`--version` 的零副作用、未知参数 exit 2、启动失败诊断无裸栈、`parseArgs`/`resolveConfig` 纯函数 | **115**(POSIX 114,有一条 Windows 专有断言) | 否 |
 | `selftest-mcp.mjs` | 真实 stdio 握手、5 个工具的 schema、保存、检索、幂等、列表/按前缀取回、删除后不再召回、错误码、向量开关对比、落盘检查、stderr 日志 | **40** | 否 |
-| `selftest.mjs` | 单进程语义、**4 进程 × 20 条真并发**、外部追加不被抹除、跨进程锁(超时/陈旧锁/粒度)、`.vec` 边车、别名映射 | **55** | 否 |
-| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、schema 自检 | **60**(POSIX 59,盘符大小写折叠是 Windows 专有语义) | 否 |
+| `selftest.mjs` | 单进程语义、**4 进程 × 20 条真并发**、外部追加不被抹除、跨进程锁(超时/陈旧锁/粒度)、`.vec` 边车、别名映射 | **57** | 否 |
+| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、上游 0.26 对齐(supersedes 前缀解析 / state TTL / 退役与过期过滤 / `custom:` 前缀)、schema 自检 | **84**(POSIX 83,盘符大小写折叠是 Windows 专有语义) | 否 |
 | `selftest-protocol.mjs` | 握手、tools/list、tools/call 正常/错误路径、stdout 纯净性 | **18** | 否 |
 | `selftest-vector.mjs` | 配置解析、探活、复用不 spawn、维度、L2 归一化、熔断退避、与已存向量的空间兼容性 | **27** | **只读** |
 | `selftest-vector-e2e.mjs` | 写 `.vec` 边车 → 读回 → 不同措辞的语义召回 | **6** | 否 |

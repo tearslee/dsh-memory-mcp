@@ -103,9 +103,9 @@ try {
   const forgetSchema = byName.memory_forget?.inputSchema
 
   record('memory_save.content 必填', saveSchema?.required?.includes('content') === true, `required=${JSON.stringify(saveSchema?.required)}`)
-  record('memory_save.kind 默认 note + 6 个枚举值',
+  record('memory_save.kind 默认 note + 7 个枚举值',
     saveSchema?.properties?.kind?.default === 'note'
-    && saveSchema?.properties?.kind?.enum?.length === 6,
+    && saveSchema?.properties?.kind?.enum?.length === 7,
     `default=${saveSchema?.properties?.kind?.default} enum=${JSON.stringify(saveSchema?.properties?.kind?.enum)}`)
   record('memory_save.importance 范围 0~1',
     saveSchema?.properties?.importance?.minimum === 0 && saveSchema?.properties?.importance?.maximum === 1,

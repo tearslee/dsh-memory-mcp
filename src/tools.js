@@ -27,8 +27,10 @@ import { isAbsolute, normalize, resolve } from 'node:path'
 import { buildStats, cosine, hasStrongHit, lexicalScore, normalizeInPlace, recordScore, tokenize } from './scoring.js'
 import { normalizeScopeInput, scopeTier } from './scope.js'
 
-/** 记忆种类(与上游一致)。 */
-export const KINDS = ['fact', 'decision', 'preference', 'procedure', 'note', 'rule']
+/** 记忆种类(与上游 0.26 一致)。 */
+export const KINDS = ['fact', 'decision', 'preference', 'procedure', 'note', 'rule', 'state']
+/** kind=state 的默认有效期:上游默认 7 天。 */
+export const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 /** 检索参数默认值 / 范围(与上游一致)。 */
 export const TOPK_DEFAULT = 5
 export const TOPK_MIN = 1
@@ -55,6 +57,22 @@ export const MAX_BACKOFF_MS = 30_000
 /** 8 位 id 前缀 —— 展示与 memory_get 的定位键。 */
 export function shortId(id) {
   return typeof id === 'string' ? id.slice(0, 8) : ''
+}
+
+/**
+ * 检索/列表结果里正文的摘要长度上限。
+ *
+ * 与上游 DSH 插件 0.16.0 的行为对齐(`memory_search` 不再返回正文,只回 id + 摘要,
+ * 正文统一走 `memory_get`)。理由不是"省字符"而是**同一份正文会在一次调用里出现三遍**:
+ * `content[0].text`、`structuredContent.message`、`structuredContent.records[].content` ——
+ * 客户端把这三处都塞进上下文,等于为一条记忆付三份 token。
+ */
+export const SUMMARY_CHARS = 160
+
+/** 把正文压成摘要:空白折叠 + 截断,超长时加省略号让 agent 知道该去 `memory_get`。 */
+export function summarize(content) {
+  const flat = String(content ?? '').replace(/\s+/g, ' ').trim()
+  return flat.length <= SUMMARY_CHARS ? flat : `${flat.slice(0, SUMMARY_CHARS)}…`
 }
 
 function round4(n) {
@@ -190,6 +208,15 @@ function adaptStore(store) {
     },
 
     /**
+     * `.vec` 身份头是否匹配。
+     * 委托给存储层(与上游同一套两段/三段兼容语义);缺失时退化为不校验身份。
+     */
+    identityMatches(header) {
+      if (typeof store.identityMatches === 'function') return store.identityMatches(header)
+      return true
+    },
+
+    /**
      * 触达计数(检索命中后 accessCount+1 / lastAccessedAt 刷新)。
      *
      * 优先用 `touchMany(ids)` —— 存储层会按 scope 分组,每个 scope 只取一次锁、
@@ -227,9 +254,11 @@ const SCOPE_HELP =
   "作用域。省略时的默认行为见工具说明。'global'=所有项目共享;'project'=当前工作区;"
   + "'project:<绝对路径>'=指定工作区;'session:<id>'=指定会话作用域(原样保留);"
   + "其他任意名称=自定义作用域(小写折叠、内部空白折叠为单空格、1~64 字符、"
-  + "禁 ':' '/' '\\' '..' 与保留名 global/project/session/all)。读取时可用 'all' 跨所有作用域。"
+  + "禁 ':' '/' '\\' '..' 与保留名 global/project/session/all);"
+  + "也接受展示名 custom:<name> 并自动折成裸名。读取时可用 'all' 跨所有作用域。"
 
-const KIND_HELP = '记忆种类:fact / decision / preference / procedure / note / rule。'
+const KIND_HELP = '记忆种类:fact / decision / preference / procedure / note / rule / state'
+  + '(state 默认 7 天后过期,过期记录默认不出现在检索/列表里)。'
 
 /** 五个工具的 JSON Schema —— 字段名、默认值、取值范围与上游对齐。 */
 export const TOOL_SCHEMAS = {
@@ -255,7 +284,7 @@ export const TOOL_SCHEMAS = {
       kind: { type: 'string', enum: KINDS, default: 'note', description: KIND_HELP },
       tags: { type: 'array', items: { type: 'string' }, description: '自由标签,便于人工归类。' },
       importance: { type: 'number', minimum: 0, maximum: 1, description: '重要度 0~1,越大越优先被召回。越界会报错。' },
-      supersedes: { type: 'string', description: '被本条取代/纠正的记忆 id(可写 8 位前缀)。' },
+      supersedes: { type: 'string', description: '被本条取代/纠正的记忆 id(可写 8 位前缀,写入时解析成完整 id;目标必须与本条同作用域)。' },
     },
     required: ['content'],
   },
@@ -272,6 +301,7 @@ export const TOOL_SCHEMAS = {
           + "写 'all' 则跨所有已发现的作用域检索。",
       },
       topK: { type: 'number', minimum: TOPK_MIN, maximum: TOPK_MAX, default: TOPK_DEFAULT, description: '返回条数,1~20,默认 5。' },
+      includeSuperseded: { type: 'boolean', default: false, description: '默认 false,已被取代的旧记录不返回;true 时一并返回(历史核对)。' },
     },
     required: ['query'],
   },
@@ -335,13 +365,15 @@ export const TOOL_DESCRIPTIONS = {
 
   memory_search:
     '按关键词或语义检索已保存的记忆(词法 + 本地向量混合召回)。'
-    + '在开始新任务、或者需要回忆"之前定的规矩是什么"时先调用它。\n'
+    + '在开始新任务、或者需要回忆"之前定的规矩是什么"时先调用它。'
+    + '只回 id + 摘要(前 160 字);要全文用 memory_get 传 8 位 id。\n'
     + '【默认 scope】省略 scope 时在**当前工作区 + global**里检索;'
     + "写 scope=\"all\" 跨所有已发现的作用域检索(只读)。",
 
   memory_list:
     '列出已保存的记忆,按最近更新优先。'
-    + '当你想快速浏览"到底存了些什么"、或者要找一条记忆的 id 时用它(比 search 更确定、更省)。\n'
+    + '当你想快速浏览"到底存了些什么"、或者要找一条记忆的 id 时用它(比 search 更确定、更省)。'
+    + '同样只回 id + 摘要,全文用 memory_get。\n'
     + '【默认 scope】省略 scope 时列出**当前工作区 + global**;'
     + "写 scope=\"all\" 列出所有作用域。",
 
@@ -468,6 +500,33 @@ export function createTools(deps) {
     return [resolved.scope]
   }
 
+  /**
+   * 把 supersedes 的 8 位前缀解析成**完整 UUID**再落盘。
+   *
+   * 上游 0.25.12 起按完整 id 精确查退役记录,写短前缀会让被取代的旧记录
+   * "永远算不上退役"(检索照旧返回两条)。目标必须与本条同作用域 —— 上游同语义。
+   *
+   * @param {string} token 完整 id 或 8 位前缀
+   * @param {string} scopeKey 本条记录将写入的作用域
+   * @returns {string} 目标记录的完整 id
+   */
+  function resolveSupersedesToken(token, scopeKey) {
+    const inScope = store.listRecords({ scopeKeys: [scopeKey] })
+    if (inScope.some((r) => r.id === token)) return token
+    const hits = [...new Set(inScope
+      .filter((r) => typeof r.id === 'string' && r.id.startsWith(token))
+      .map((r) => r.id))]
+    if (hits.length === 1) return hits[0]
+    if (hits.length > 1) {
+      throw new ToolError('SUPERSEDES_AMBIGUOUS',
+        `supersedes 前缀 ${token} 在作用域 ${scopeKey} 里命中 ${hits.length} 条记录,请写更长的前缀或完整 id。`)
+    }
+    const elsewhere = store.listRecords({}).some((r) => typeof r.id === 'string' && r.id.startsWith(token))
+    throw new ToolError('SUPERSEDES_UNKNOWN',
+      `supersedes 目标 ${token} 不在作用域 ${scopeKey} 里`
+      + (elsewhere ? '(它属于其他作用域;被取代记录必须与本条同作用域)' : ';请先用 memory_search 确认 id。'))
+  }
+
   // ── memory_save ────────────────────────────────────────────────
   async function memorySave(args = {}) {
     const content = requireString(args.content, 'CONTENT_EMPTY', 'content').trim()
@@ -477,7 +536,7 @@ export function createTools(deps) {
     }
     const importance = optionalNumber(args.importance, { field: 'importance', min: 0, max: 1, code: 'IMPORTANCE_RANGE' })
     const tags = Array.isArray(args.tags) ? args.tags.map((t) => String(t)) : []
-    const supersedes = typeof args.supersedes === 'string' && args.supersedes.trim() !== ''
+    const supersedesToken = typeof args.supersedes === 'string' && args.supersedes.trim() !== ''
       ? args.supersedes.trim()
       : undefined
 
@@ -505,6 +564,10 @@ export function createTools(deps) {
       scopeKey = resolved.scope
     }
 
+    const supersedes = supersedesToken !== undefined
+      ? resolveSupersedesToken(supersedesToken, scopeKey)
+      : undefined
+
     if (alias !== undefined && names && typeof names.claim === 'function') {
       try {
         names.claim(scopeKey, alias)
@@ -521,6 +584,8 @@ export function createTools(deps) {
       source: { origin: 'explicit' },
       ...(importance !== undefined ? { importance } : {}),
       ...(supersedes !== undefined ? { supersedes } : {}),
+      // kind=state 默认 7 天 TTL(与上游默认一致);到期后检索/列表默认不返回,记录仍保留。
+      ...(kind === 'state' ? { expiredAt: Date.now() + STATE_TTL_MS } : {}),
     })
 
     // 向量回填(失败不影响保存本身)
@@ -558,6 +623,7 @@ export function createTools(deps) {
     const query = requireString(args.query, 'QUERY_EMPTY', 'query').trim()
     const topK = optionalNumber(args.topK, { field: 'topK', min: TOPK_MIN, max: TOPK_MAX, code: 'TOPK_RANGE' })
       ?? TOPK_DEFAULT
+    const includeSuperseded = args.includeSuperseded === true
 
     const scopeKeys = readScopeKeys(args.scope)
     const now = Date.now()
@@ -568,6 +634,12 @@ export function createTools(deps) {
     const byScope = new Map()
     for (const scopeKey of scopeKeys) {
       byScope.set(scopeKey, store.listRecords({ scopeKeys: [scopeKey] }))
+    }
+
+    // 被其他记录 supersedes 指向的 id = 已退役;默认不参与召回(与上游 0.26 同口径)。
+    const supersededIds = new Set()
+    for (const records of byScope.values()) {
+      for (const rec of records) if (rec.supersedes) supersededIds.add(rec.supersedes)
     }
 
     // 通道 1:词法召回(IDF 在每个 scope 内部独立统计)
@@ -582,6 +654,7 @@ export function createTools(deps) {
         const rec = records[i]
         recordById.set(rec.id, rec)
         if (rec.expiredAt && rec.expiredAt < now) continue
+        if (!includeSuperseded && supersededIds.has(rec.id)) continue
         const lex = lexicalScore(queryTokens, tokenSets[i], stats)
         if (lex <= 0) continue
         // 强命中(共享拉丁词或 CJK bigram)用宽松阈值;只有单字命中要过更高的地板。
@@ -603,7 +676,8 @@ export function createTools(deps) {
             if (!sidecar || sidecar.vectors.size === 0) continue
             // 模型身份不匹配 ⇒ 整个边车作废(上游语义),绝不用旧模型的向量算相似度。
             // 空串 identity = 还没有头(新文件),那是"尚未嵌入",不是"不匹配"。
-            if (sidecar.identity && sidecar.identity !== vector.identity) continue
+            // 用 store.identityMatches():上游 0.10.0 起写三段头(含 pooling),严格比会静默丢弃。
+            if (!store.identityMatches(sidecar.identity)) continue
             for (const [id, vec] of sidecar.vectors) {
               if (!vec) continue
               const sim = cosine(qvec, vec)
@@ -616,6 +690,7 @@ export function createTools(deps) {
               const rec = recordById.get(id)
               if (!rec) continue
               if (rec.expiredAt && rec.expiredAt < now) continue
+              if (!includeSuperseded && supersededIds.has(rec.id)) continue
               if (rec.scope === 'global' && sim < GLOBAL_THRESHOLD) continue
               candidates.set(id, { record: rec, recallScore: sim, isGlobal: rec.scope === 'global' })
             }
@@ -627,10 +702,6 @@ export function createTools(deps) {
     }
 
     // 打分:词法/余弦召回分 × 时间衰减 × 重要度 × 触达加成 × 被取代惩罚
-    const supersededIds = new Set()
-    for (const records of byScope.values()) {
-      for (const rec of records) if (rec.supersedes) supersededIds.add(rec.supersedes)
-    }
     const shape = (c) => recordScore(
       c.recallScore,
       c.record.importance ?? 0.5,
@@ -653,7 +724,7 @@ export function createTools(deps) {
     const lines = ranked.map((c) => {
       const score = round4(shape(c))
       const rec = c.record
-      const head = `[${score.toFixed(4)}] (${rec.scope ?? 'global'}/${rec.kind ?? 'note'}) ${rec.content ?? ''}`
+      const head = `[${score.toFixed(4)}] (${rec.scope ?? 'global'}/${rec.kind ?? 'note'}) ${summarize(rec.content)}`
       const meta = [
         `id=${shortId(rec.id)}`,
         rec.tags && rec.tags.length > 0 ? `tags=${rec.tags.join(',')}` : null,
@@ -678,18 +749,19 @@ export function createTools(deps) {
         scopes: scopeKeys,
         // 字段名用 `records` 而非 `results`：上游 DSH 的 memory_search 返回 {records:[...]}
         // (lib/tools/index.js:296-305),同名能让同一个 agent 在两边用同一套读取习惯。
+        // 摘要只在 `content[0].text`(必读通道)出现一次 —— 结构化通道只放机器可判字段,
+        // 否则同一条记忆的正文会在一次调用里出现两三遍(见 SUMMARY_CHARS 注释)。
         records: ranked.map((c) => ({
           id: c.record.id,
           shortId: shortId(c.record.id),
           score: round4(shape(c)),
           scope: c.record.scope ?? 'global',
           kind: c.record.kind ?? 'note',
-          content: c.record.content ?? '',
+          contentLength: (c.record.content ?? '').length,
           tags: c.record.tags ?? [],
           importance: c.record.importance ?? 0,
           updatedAt: c.record.updatedAt ?? null,
         })),
-        message: text,
       },
     }
   }
@@ -704,15 +776,21 @@ export function createTools(deps) {
     }
 
     const scopeKeys = readScopeKeys(args.scope)
-    const records = store.listRecords({
+    // 先取全量再过滤:退役/过期记录被隐藏后仍要凑够 limit 条(与上游同口径)。
+    const allRecords = store.listRecords({
       scopeKeys,
       ...(kind !== undefined ? { kind } : {}),
-      limit,
     })
+    const now = Date.now()
+    const supersededIds = new Set()
+    for (const rec of allRecords) if (rec.supersedes) supersededIds.add(rec.supersedes)
+    const records = allRecords
+      .filter((rec) => !(rec.expiredAt && rec.expiredAt < now) && !supersededIds.has(rec.id))
+      .slice(0, limit)
 
     const lines = records.map((rec) => {
       const updated = rec.updatedAt ? new Date(rec.updatedAt).toISOString().slice(0, 19).replace('T', ' ') : '-'
-      return `[${shortId(rec.id)}] (${rec.scope ?? 'global'}/${rec.kind ?? 'note'}) ${rec.content ?? ''}\n`
+      return `[${shortId(rec.id)}] (${rec.scope ?? 'global'}/${rec.kind ?? 'note'}) ${summarize(rec.content)}\n`
         + `    importance=${Number(rec.importance ?? 0).toFixed(2)}  updated=${updated}`
         + `${rec.tags && rec.tags.length > 0 ? `  tags=${rec.tags.join(',')}` : ''}`
     })
@@ -720,6 +798,7 @@ export function createTools(deps) {
     const text = records.length === 0
       ? `没有记忆(范围:${scopeText})。`
       : `列出 ${records.length} 条记忆(范围:${scopeText})\n\n${lines.join('\n\n')}`
+        + '\n\n提示:需要完整内容时用 memory_get 传入上面的 8 位 id 前缀。'
 
     return {
       content: [{ type: 'text', text }],
@@ -727,17 +806,17 @@ export function createTools(deps) {
         ok: true,
         count: records.length,
         scopes: scopeKeys,
+        // 与 memory_search 同口径:摘要只在 content[0].text 出现一次,正文走 memory_get。
         records: records.map((rec) => ({
           id: rec.id,
           shortId: shortId(rec.id),
           scope: rec.scope ?? 'global',
           kind: rec.kind ?? 'note',
-          content: rec.content ?? '',
+          contentLength: (rec.content ?? '').length,
           tags: rec.tags ?? [],
           importance: rec.importance ?? 0,
           updatedAt: rec.updatedAt ?? null,
         })),
-        message: text,
       },
     }
   }
@@ -798,7 +877,6 @@ export function createTools(deps) {
           supersedes: rec.supersedes ?? null,
         })),
         missing,
-        message: text,
       },
     }
   }

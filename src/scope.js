@@ -113,7 +113,8 @@ export function normalizeScopeName(raw) {
  *   - `undefined` / 空串 → `kind: 'current-session'`(调用方按写/读口径决定落到哪里);
  *   - 'global' | 'project' | 'session' → 各自的**种类**,不在这里解析 cwd/会话(纯函数拿不到);
  *   - 'all' | '*' → 跨所有作用域(仅读路径合法,写路径由 resolveScopeRef 拒绝);
- *   - 'project:*' | 'session:*' → 原样放行(显式 pin 某个项目 / 某个会话);
+ *   - `project:*' | `session:*' → 原样放行(显式 pin 某个项目 / 某个会话);
+ *   - `custom:<name>` → 剥一层展示前缀后按自定义名严格校验(上游 0.26 同语义);
  *   - 其余 → 自定义名,严格校验。
  *
  * 不合法**不再静默回退**,一律返回 SCOPE_INVALID。
@@ -142,6 +143,14 @@ export function normalizeScopeInput(raw) {
     return prefixed.ok
       ? { ok: true, kind: 'session', scope: prefixed.key }
       : { ok: false, code: 'SCOPE_INVALID', message: prefixed.message }
+  }
+  if (lower.startsWith('custom:')) {
+    // 上游 0.25.10 起展示名统一为 `<类型>:<名字>`;Agent 常把 `custom:handbook` 原样传回来。
+    // 只剥一层前缀,再按裸名严格校验(custom:global / custom:foo:bar 仍然非法)。
+    const custom = normalizeCustomName(value.slice('custom:'.length))
+    return custom.ok
+      ? { ok: true, kind: 'custom', scope: custom.name }
+      : { ok: false, code: 'SCOPE_INVALID', message: `${custom.message} (pass the bare scope name, e.g. "handbook")` }
   }
   const custom = normalizeCustomName(value)
   return custom.ok

@@ -178,8 +178,9 @@ try {
   })
   // 必须排除**本次自己刚写的**那条：它同样含 "dsh-memory / 记忆 / JSONL" 等词，
   // 不排除的话这一节会拿自己的记录冒充"DSH 既有记忆"，白白绿一次。
+  // marker 写在正文开头，摘要（前 160 字符）一定含它，所以比对 summary 足够。
   const legacyRecs = (legacy.structuredContent?.records ?? [])
-    .filter((r) => r.id !== id && !String(r.content ?? '').includes(marker))
+    .filter((r) => r.id !== id && !String(r.summary ?? '').includes(marker))
   if (legacyRecs.length > 0) {
     check(true, '检索到 DSH 既有记忆（已排除本次自造的记录）', `命中 ${legacyRecs.length} 条`)
     const scopesSeen = [...new Set(legacyRecs.map((r) => r.scope))]

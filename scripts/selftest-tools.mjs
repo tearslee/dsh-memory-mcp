@@ -6,7 +6,7 @@
  */
 import { join } from 'node:path'
 
-import { normalizeProjectPath, projectScopeKey, createTools, runTool, TOOL_NAMES, TOOL_SCHEMAS } from '../src/tools.js'
+import { normalizeProjectPath, projectScopeKey, createTools, runTool, TOOL_NAMES, TOOL_SCHEMAS, STATE_TTL_MS } from '../src/tools.js'
 
 /**
  * 路径样例**必须按平台取**。
@@ -75,6 +75,7 @@ class FakeStore {
       accessCount: 0,
       importance: input.importance ?? 0.5,
       ...(input.supersedes ? { supersedes: input.supersedes } : {}),
+      ...(input.expiredAt ? { expiredAt: input.expiredAt } : {}),
     }
     this.records.set(rec.id, rec)
     return { deduped: false, record: rec }
@@ -115,6 +116,11 @@ class FakeStore {
     const sc = this.sidecars.get(scopeKey) ?? { identity: '', model: '', dims: 0, vectors: new Map() }
     sc.vectors.set(id, vec)
     this.sidecars.set(scopeKey, sc)
+  }
+
+  /** 与 SharedStore.identityMatches 同语义(两段/三段头兼容)。 */
+  identityMatches(header) {
+    return this.vecIdentity ? !header || header.split('\t')[0] === this.vecIdentity.split('\t')[0] : true
   }
 }
 
@@ -265,8 +271,8 @@ r = await runTool(handlers, 'memory_forget', { query: '批量删除目标内容'
 check('query + 省略 scope → 只删当前项目', r.structuredContent.deleted === 1,
   `deleted=${r.structuredContent.deleted} scope=${r.structuredContent.scope}`)
 r = await runTool(handlers, 'memory_list', { scope: 'global' })
-check('global 里那条还在', r.structuredContent.records.some((x) => x.content.includes('批量删除目标内容')),
-  JSON.stringify(r.structuredContent.records.map((x) => x.content)))
+check('global 里那条还在', r.content[0].text.includes('批量删除目标内容'),
+  r.content[0].text.slice(0, 120))
 
 // ── 自定义作用域 ────────────────────────────────────────────────
 console.log('\n[8] 自定义作用域')
@@ -280,7 +286,7 @@ console.log('\n[9] schema 自检')
 check('5 个工具', TOOL_NAMES.length === 5, TOOL_NAMES.join(','))
 check('memory_save.content 必填', TOOL_SCHEMAS.memory_save.required.includes('content'))
 check('memory_save.kind 默认 note', TOOL_SCHEMAS.memory_save.properties.kind.default === 'note')
-check('memory_save.kind 6 个枚举', TOOL_SCHEMAS.memory_save.properties.kind.enum.length === 6)
+check('memory_save.kind 7 个枚举', TOOL_SCHEMAS.memory_save.properties.kind.enum.length === 7)
 check('memory_save.importance 0~1',
   TOOL_SCHEMAS.memory_save.properties.importance.minimum === 0
   && TOOL_SCHEMAS.memory_save.properties.importance.maximum === 1)
@@ -298,6 +304,106 @@ check('memory_forget 同时有 id 与 query', TOOL_SCHEMAS.memory_forget.propert
   && TOOL_SCHEMAS.memory_forget.properties.query !== undefined)
 check('所有 schema 都不带 strict additionalProperties',
   Object.values(TOOL_SCHEMAS).every((s) => s.additionalProperties === undefined))
+
+// ── 载荷不重复（2026-10-26 契约：正文只在文本通道出现一次，且是摘要）──────
+// 旧版同一条正文在一次调用里出现三遍：content[0].text / structuredContent.message /
+// records[].content，客户端全塞进上下文 = 为一条记忆付三份 token。
+// 放在最后：新增记录会推进假 store 的 id 序列，不能插在靠 id 前缀断言的用例之前。
+console.log('\n[10] 载荷不重复')
+const LONG_BODY = `长正文摘要测试 ${'甲'.repeat(400)}`
+await runTool(handlers, 'memory_save', { content: LONG_BODY, scope: 'project', kind: 'note' })
+const sumRes = await runTool(handlers, 'memory_search', { query: '长正文摘要测试', scope: 'project' })
+check('检索 structuredContent 不再带 message（与 text 重复）',
+  sumRes.structuredContent.message === undefined, `message=${JSON.stringify(sumRes.structuredContent.message)?.slice(0, 40)}`)
+check('检索记录不再带 content 字段（全文走 memory_get）',
+  sumRes.structuredContent.records.every((x) => x.content === undefined),
+  JSON.stringify(Object.keys(sumRes.structuredContent.records[0] ?? {})))
+const longRec = sumRes.structuredContent.records.find((x) => x.contentLength === LONG_BODY.length)
+check('检索记录带 contentLength（用于判断要不要 memory_get）', !!longRec,
+  JSON.stringify(sumRes.structuredContent.records.map((x) => x.contentLength)))
+check('摘要只在文本通道出现一次，结构化通道不带 summary',
+  longRec?.summary === undefined, JSON.stringify(Object.keys(longRec ?? {})))
+check('文本输出里是摘要而非全文', !sumRes.content[0].text.includes('甲'.repeat(200)),
+  `text 长度=${sumRes.content[0].text.length}`)
+check('文本输出含截断后的摘要', sumRes.content[0].text.includes('甲'.repeat(120)), '')
+check('短正文不截断、不加省略号',
+  (await runTool(handlers, 'memory_search', { query: 'TypeScript 严格模式', scope: 'project' }))
+    .content[0].text.includes('项目里的记忆:前端统一使用 TypeScript 严格模式'), '')
+const listSum = await runTool(handlers, 'memory_list', { scope: 'project' })
+check('列表结构化通道同样不带 content / summary',
+  listSum.structuredContent.records.every((x) => x.content === undefined && x.summary === undefined),
+  JSON.stringify(Object.keys(listSum.structuredContent.records[0] ?? {})))
+check('列表不再带 message', listSum.structuredContent.message === undefined, '')
+// 假 store 的 id 全部共享前 8 位（00000000-…），前缀会命中多条 → 这里用完整 id。
+const getFull = await runTool(handlers, 'memory_get', { ids: [longRec.id] })
+check('memory_get 仍返回完整正文（摘要不可替代全文）',
+  getFull.structuredContent.records[0]?.content === LONG_BODY,
+  `取回长度=${getFull.structuredContent.records[0]?.content?.length}`)
+
+// ── 与上游 0.26 对齐：supersedes / state / 退役过滤 / custom: 前缀 ─────────
+console.log('\n[11] 上游 0.26 对齐')
+const aligned = new FakeStore()
+const seededAt = Date.now()
+const seed = (id, scope, content, extra = {}) => aligned.records.set(id, {
+  id, scope, kind: 'fact', content, tags: [], source: { origin: 'explicit' },
+  createdAt: seededAt, updatedAt: seededAt, lastAccessedAt: seededAt, accessCount: 0, importance: 0.5, ...extra,
+})
+const oldId = 'aaaaaaaa-1111-4111-8111-111111111111'
+const crossId = 'bbbbbbbb-2222-4222-8222-222222222222'
+const expiredId = 'cccccccc-3333-4333-8333-333333333333'
+seed(oldId, 'global', '旧结论：部署使用蓝绿方案 alpha')
+seed(crossId, projectKey, '跨作用域旧结论 gamma')
+seed(expiredId, 'global', '过期状态 delta', { kind: 'state', expiredAt: seededAt - 1000 })
+seed('dddddddd-4444-4444-8444-444444444444', 'global', '同前缀 e1')
+seed('dddddddd-5555-4555-8555-555555555555', 'global', '同前缀 e2')
+const alignedHandlers = createTools({ store: aligned, config: { projectBasePath: PROJECT, defaultSaveScope: 'global' } })
+
+let ar = await runTool(alignedHandlers, 'memory_save', { content: '新结论：部署改用滚动发布 beta', supersedes: 'aaaaaaaa' })
+const savedSupersedes = aligned.records.get(ar.structuredContent.id)?.supersedes
+check('supersedes 短前缀 → 落盘完整 UUID', savedSupersedes === oldId, `落盘=${savedSupersedes}`)
+
+ar = await runTool(alignedHandlers, 'memory_save', { content: '未知目标测试', supersedes: 'ffffffff' })
+check('supersedes 未知前缀 → SUPERSEDES_UNKNOWN',
+  ar.isError === true && ar.structuredContent.code === 'SUPERSEDES_UNKNOWN', `code=${ar.structuredContent.code}`)
+
+ar = await runTool(alignedHandlers, 'memory_save', { content: '跨作用域目标测试', supersedes: 'bbbbbbbb' })
+check('supersedes 跨作用域 → SUPERSEDES_UNKNOWN',
+  ar.isError === true && ar.structuredContent.code === 'SUPERSEDES_UNKNOWN', `code=${ar.structuredContent.code}`)
+
+ar = await runTool(alignedHandlers, 'memory_save', { content: '歧义前缀测试', supersedes: 'dddddddd' })
+check('supersedes 歧义前缀 → SUPERSEDES_AMBIGUOUS',
+  ar.isError === true && ar.structuredContent.code === 'SUPERSEDES_AMBIGUOUS', `code=${ar.structuredContent.code}`)
+
+ar = await runTool(alignedHandlers, 'memory_save', { content: '临时状态 zeta', kind: 'state' })
+const stateRec = aligned.records.get(ar.structuredContent.id)
+check('state 默认 7 天 TTL', Math.abs(stateRec.expiredAt - (Date.now() + STATE_TTL_MS)) < 5000,
+  `expiredAt-now=${stateRec.expiredAt - Date.now()}`)
+check('state 可被 memory_list 的 kind 过滤', (await runTool(alignedHandlers, 'memory_list', { scope: 'global', kind: 'state' }))
+  .structuredContent.records.some((x) => x.id === ar.structuredContent.id), '')
+
+const retiredSearch = await runTool(alignedHandlers, 'memory_search', { query: '蓝绿方案 alpha', scope: 'global' })
+check('检索默认隐藏被取代记录',
+  !retiredSearch.structuredContent.records.some((x) => x.id === oldId),
+  JSON.stringify(retiredSearch.structuredContent.records.map((x) => x.id)))
+const historySearch = await runTool(alignedHandlers, 'memory_search', { query: '蓝绿方案 alpha', scope: 'global', includeSuperseded: true })
+check('includeSuperseded=true 可回历史',
+  historySearch.structuredContent.records.some((x) => x.id === oldId),
+  JSON.stringify(historySearch.structuredContent.records.map((x) => x.id)))
+check('检索默认隐藏已过期记录',
+  !(await runTool(alignedHandlers, 'memory_search', { query: '过期状态 delta', scope: 'global' }))
+    .structuredContent.records.some((x) => x.id === expiredId), '')
+
+const alignedList = await runTool(alignedHandlers, 'memory_list', { scope: 'global' })
+check('列表默认隐藏被取代记录', !alignedList.structuredContent.records.some((x) => x.id === oldId), '')
+check('列表默认隐藏已过期记录', !alignedList.structuredContent.records.some((x) => x.id === expiredId), '')
+check('memory_get 仍可取回被取代/过期记录(历史)',
+  (await runTool(alignedHandlers, 'memory_get', { ids: [oldId, expiredId] }))
+    .structuredContent.records.length === 2, '')
+
+ar = await runTool(alignedHandlers, 'memory_save', { content: '自定义作用域测试', scope: 'custom:Handbook' })
+check('custom:<name> 折成裸名', ar.structuredContent.scope === 'handbook', `scope=${ar.structuredContent.scope}`)
+ar = await runTool(alignedHandlers, 'memory_save', { content: '非法自定义前缀', scope: 'custom:global' })
+check('custom:global 仍非法', ar.isError === true && ar.structuredContent.code === 'SCOPE_INVALID', `code=${ar.structuredContent.code}`)
 
 // ── 汇总 ────────────────────────────────────────────────────────
 console.log(`\n共 ${results.length} 项检查,通过 ${results.length - failures} 项,失败 ${failures} 项。`)
