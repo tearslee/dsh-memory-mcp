@@ -255,6 +255,7 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | Trae | `%APPDATA%\Trae CN\User\mcp.json` | 顶层 `mcpServers` | `{ name: { command, args, env } }` |
 | WorkBuddy | `%USERPROFILE%\.workbuddy\mcp.json` | 顶层 `mcpServers` | 同上 |
 | **ZCode** | `%USERPROFILE%\.zcode\cli\config.json` | **嵌套 `mcp.servers`** | `{ name: { type, command, args, env, timeoutMs } }` |
+| **Codex (Magpie)** | `%USERPROFILE%\.codex\config.toml` | 顶层 `[mcp_servers.magpie]` | `{ url = "http://127.0.0.1:3425/mcp/magpie/hub/codex" }` |
 
 **ZCode 的坑(全部对 `ZCode.exe` / `resources/glm/zcode.cjs` 求证过)**:
 
@@ -274,6 +275,10 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 **端口共享**:ZCode 实例与 Trae/WorkBuddy 实例会**复用同一个 8199 向量后端**
 (`ensureReady()` 先探活,活着就复用、不接管生命周期)。实测本机 8199 由某个 MCP 实例 spawn,
 ZCode 侧起手时打的是 `vector: 复用已有服务 http://127.0.0.1:8199(不接管生命周期)`。
+
+**Codex 经 Magpie**:Codex 当前通过 `[mcp_servers.magpie]` 连本地 Magpie 网关,由 Magpie 把 `dsh-memory`
+暴露成 `mcp__magpie__dsh_memory__*`。改完 MCP 工具清单后,**当前 Codex 会话不会自动刷新**,
+需要重载 Magpie 或新开会话;直接起 `node src/index.js` 验证 7 个工具是代码侧证据,不能替代网关刷新。
 所以**不要**给每个宿主配不同端口 —— 那只会白白多占一份 600MB 的模型内存。
 
 ---
