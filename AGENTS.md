@@ -4,8 +4,8 @@
 > 写给人的完整说明在 [README.md](./README.md);这里只写「动手前必须知道的事」。
 
 **这是什么**:把 `@restregular/dsh-memory` 的长期记忆库(JSONL + 本地向量)抽成**独立 stdio MCP 服务**,让
-DSH / Trae / WorkBuddy / ZCode 等任意 MCP 客户端共用同一份 `storeDir`。五个工具:`memory_save` / `memory_search` /
-`memory_list` / `memory_get` / `memory_forget`。
+DSH / Trae / WorkBuddy / ZCode 等任意 MCP 客户端共用同一份 `storeDir`。七个工具:`memory_save` / `memory_search` /
+`memory_list` / `memory_get` / `memory_forget` / `memory_index` / `memory_index_status`。
 
 **数据落在哪**:纯文件,无数据库、无后台服务。`<storeDir>/global.jsonl`、`<storeDir>/projects/<sha1(scope)>.jsonl`、
 同名 `.vec` 向量边车、`<storeDir>/.locks/`、`<storeDir>/scopes.json`(只有登记过别名才存在)。
@@ -37,8 +37,8 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | 其余 8 个 src 文件 | 零外部依赖,只 import `node:*` 与彼此 | 同上 |
 | 版本号 | `0.1.0`,两处必须同步:`package.json` `version` 与 `src/server.js` `SERVER_VERSION` | `selftest-cli.mjs` 断言 |
 
-`src/` 共 9 个文件:`index.js` `server.js` `tools.js` `store.js` `lock.js` `scope.js` `scope-names.js`
-`scoring.js` `vector.js`。`package.json` 的 `exports` 把它们逐个映射成子路径(`./store` `./vector` …),
+`src/` 共 10 个文件:`index.js` `server.js` `tools.js` `store.js` `lock.js` `scope.js` `scope-names.js`
+`scoring.js` `vector.js` `workbuddy-index.js`。`package.json` 的 `exports` 把它们逐个映射成子路径(`./store` `./vector` …),
 **新增文件必须同步补 `exports`**,否则 `import 'dsh-memory-mcp/xxx'` 会失败。
 
 ### 启动参数(`src/index.js` → `parseArgs`)
@@ -114,6 +114,11 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
   `memory_forget` 走 query→当前 `project`;裸 `session`→当前 `project`;`all`/`*` 只读。
 - `memory_search` 只用 `touchMany()` 对**最终 topK** 刷 `accessCount`(每个 scope 一次锁一次重写);换成循环 `touch()` 会让写放大 N 倍。
 - `structuredContent` 的记录数组字段叫 **`records`**(对齐上游),不是 `results`;`ok:false` 时同时带 `isError: true`。
+- `memory_index` / `memory_index_status` 是**本项目扩展**,不是上游工具:
+  - 只写 `project:<显式项目路径>`,永不写 `global`;
+  - 按 Markdown `##` 章节切分,带 `来源+hash`,同源变更用完整 UUID `supersedes`;
+  - 写入默认 `dryRun=true`,必须 `dryRun=false + confirm=true`;
+  - 日报默认只收 `YYYY-MM-DD.md`;`MEMORY.md` / `STATE.md` / `00-done-log.md` / secrets 永不索引。
 
 **错误码全集**(`code` 字段,均已从源码核对):
 
@@ -179,10 +184,12 @@ MCP 走 stdio JSON-RPC。唯一会开端口的进程是向量后端 `llama-serve
 | 脚本 | 耗时 | 检查项 | 碰真实 store? | 备注 |
 | --- | --- | --- | --- | --- |
 | `selftest-cli.mjs` | 2.3s | 115(Win)/114(POSIX) | 否 | CLI 契约:`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析。零副作用(缺依赖场景用 tmpdir 副本模拟) |
-| `selftest-mcp.mjs` | 1.1s | 40 | 否 | 真起 stdio server(SDK `Client` + `StdioClientTransport`),`--keep` 保留 tmpdir |
+| `selftest-mcp.mjs` | 1.1s | 42 | 否 | 真起 stdio server(SDK `Client` + `StdioClientTransport`),`--keep` 保留 tmpdir |
 | `selftest.mjs` | 3.5s | 57 | 否 | 真 fork 子进程(`--worker` 自己);开头 `assertNotRealStore()` 硬守卫,命中真实路径直接中止 |
-| `selftest-tools.mjs` | 0.06s | 84(Win)/83(POSIX) | 否 | 纯内存假 store,只 import `tools.js`/`scope.js` |
+| `selftest-tools.mjs` | 0.06s | 88(Win)/87(POSIX) | 否 | 纯内存假 store,只 import `tools.js`/`scope.js` |
 | `selftest-protocol.mjs` | 0.4s | 18 | 否 | 内存假 store + 临时入口,验证 stdout 纯净性 |
+| `selftest-index-tool.mjs` | <1s | 25 | 否 | `memory_index` / `memory_index_status`;临时目录 + 假 store |
+| `selftest-index-workbuddy.mjs` | <1s | 34 | 否 | CLI 与共享索引模块;临时目录 |
 | `selftest-vector.mjs` | 0.35s | 27 | **只读** | 若 `D:\dev\.dsh-memory-store\global.vec` 存在会**读**它做向量空间比对;不写 |
 | `selftest-vector-e2e.mjs` | 0.6s | 6 | 否 | 用 tmpdir;无可用后端时**直接 `exit(0)` 跳过**(退出码 0 不代表测过) |
 | `acceptance-coexist.mjs` | 0.5s | 4 | 否(临时目录) | spawn `legacy-writer.mjs` 复刻上游无锁写者,量化双向丢数据。**已知 flaky,见下** |

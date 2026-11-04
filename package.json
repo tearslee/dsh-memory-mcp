@@ -13,6 +13,7 @@
     "./scoring": "./src/scoring.js",
     "./scope": "./src/scope.js",
     "./scope-names": "./src/scope-names.js",
+    "./workbuddy-index": "./src/workbuddy-index.js",
     "./vector": "./src/vector.js",
     "./tools": "./src/tools.js",
     "./server": "./src/server.js",
@@ -37,6 +38,7 @@
   "author": "tearslee <tears.lee.cn@gmail.com>",
   "scripts": {
     "check-install": "node scripts/check-install.mjs",
+    "index:workbuddy": "node scripts/index-workbuddy.mjs",
     "selftest": "node scripts/selftest-mcp.mjs",
     "selftest:store": "node scripts/selftest.mjs",
     "selftest:tools": "node scripts/selftest-tools.mjs",
@@ -44,7 +46,9 @@
     "selftest:vector": "node scripts/selftest-vector.mjs",
     "selftest:vector-e2e": "node scripts/selftest-vector-e2e.mjs",
     "selftest:cli": "node scripts/selftest-cli.mjs",
-    "test": "node scripts/selftest-cli.mjs && node scripts/selftest-mcp.mjs && node scripts/selftest.mjs"
+    "selftest:index": "node scripts/selftest-index-workbuddy.mjs",
+    "selftest:index-tool": "node scripts/selftest-index-tool.mjs",
+    "test": "node scripts/selftest-cli.mjs && node scripts/selftest-mcp.mjs && node scripts/selftest.mjs && node scripts/selftest-index-tool.mjs && node scripts/selftest-index-workbuddy.mjs"
   },
   "engines": {
     "node": ">=20.3.0"

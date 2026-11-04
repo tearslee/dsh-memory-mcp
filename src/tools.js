@@ -26,6 +26,14 @@
 import { isAbsolute, normalize, resolve } from 'node:path'
 import { buildStats, cosine, hasStrongHit, lexicalScore, normalizeInPlace, recordScore, tokenize } from './scoring.js'
 import { normalizeScopeInput, scopeTier } from './scope.js'
+import {
+  applyIndexPlan,
+  buildIndexPlan,
+  defaultStatusSince,
+  inspectIndex,
+  normalizeIndexSources,
+  normalizeSince,
+} from './workbuddy-index.js'
 
 /** 记忆种类(与上游 0.26 一致)。 */
 export const KINDS = ['fact', 'decision', 'preference', 'procedure', 'note', 'rule', 'state']
@@ -260,7 +268,7 @@ const SCOPE_HELP =
 const KIND_HELP = '记忆种类:fact / decision / preference / procedure / note / rule / state'
   + '(state 默认 7 天后过期,过期记录默认不出现在检索/列表里)。'
 
-/** 五个工具的 JSON Schema —— 字段名、默认值、取值范围与上游对齐。 */
+/** 工具的 JSON Schema —— 前五个与上游对齐，后两个是本仓库的项目索引扩展。 */
 export const TOOL_SCHEMAS = {
   memory_save: {
     type: 'object',
@@ -352,9 +360,50 @@ export const TOOL_SCHEMAS = {
     },
     required: [],
   },
+
+  memory_index: {
+    type: 'object',
+    properties: {
+      project: {
+        type: 'string',
+        description:
+          '项目根目录（绝对路径或相对当前项目解析）。索引永远只写 project:<解析后的绝对路径>，绝不写 global。'
+          + '省略时使用当前 --project / DSH_MEMORY_PROJECT。',
+      },
+      sources: {
+        type: 'array',
+        items: { type: 'string', enum: ['daily', 'detail', 'rules'] },
+        description: '要索引的来源，默认 ["daily"]。detail 会跳过 00-done-log.md；secrets.local.md 永远跳过。',
+      },
+      files: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '只索引指定文件（相对于 .workbuddy/memory 或项目根目录）。与 sources 一起给时以 files 为准。',
+      },
+      since: { type: 'string', description: '只索引日期 >= YYYY-MM-DD 的日报；detail/rules 不受日期过滤。' },
+      dryRun: { type: 'boolean', default: true, description: '默认 true，只返回计划不写入。必须显式 false 且 confirm=true 才写。' },
+      confirm: { type: 'boolean', default: false, description: '写入门禁。dryRun=false 时必须同时 confirm=true。' },
+      maxChars: { type: 'number', minimum: 0, description: '单条正文上限；0 表示不截断。' },
+    },
+    required: [],
+  },
+
+  memory_index_status: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '项目根目录；省略时使用当前项目。' },
+      sources: {
+        type: 'array',
+        items: { type: 'string', enum: ['daily', 'detail', 'rules'] },
+        description: '检查范围，默认 daily + detail + rules。',
+      },
+      since: { type: 'string', description: '只检查日期 >= YYYY-MM-DD 的日报。' },
+    },
+    required: [],
+  },
 }
 
-/** 五个工具的描述 —— 写给 agent 看,说明什么时候该用。 */
+/** 工具描述 —— 写给 agent 看,说明什么时候该用。 */
 export const TOOL_DESCRIPTIONS = {
   memory_save:
     '保存一条长期记忆(事实 / 决策 / 偏好 / 做法 / 规则),供以后所有会话与其它 IDE(DSH、Trae、WorkBuddy)读取。'
@@ -386,10 +435,22 @@ export const TOOL_DESCRIPTIONS = {
     '删除记忆:按 id 精确删,或按 query 子串批量删。两者**二选一**(都不给或都给都会报错)。\n'
     + '【默认 scope】用 query 删除且省略 scope 时只作用于**当前工作区**,不会误删 global 或别的 IDE 写下的内容。'
     + '删除是不可撤销的,调用前请先向用户确认。',
+
+  memory_index:
+    '把项目 `.workbuddy/memory` 的日报 / detail / rules 按 Markdown 二级章节建成 dsh project 派生索引。'
+    + '只写 project:<项目路径>，绝不写 global；每条带来源 + hash，源变化时用完整 UUID supersedes。'
+    + '默认 dryRun=true，先看计划；确认后传 dryRun=false + confirm=true。',
+
+  memory_index_status:
+    '只读检查项目索引是否新鲜：列出未索引/需替换章节、孤儿记录、源文件缺失与最近源日期。'
+    + '不写 store，适合收尾或接手前判断「索引是否停在旧日期」。',
 }
 
 /** 工具清单(顺序即 MCP tools/list 里的顺序)。 */
-export const TOOL_NAMES = ['memory_save', 'memory_search', 'memory_list', 'memory_get', 'memory_forget']
+export const TOOL_NAMES = [
+  'memory_save', 'memory_search', 'memory_list', 'memory_get', 'memory_forget',
+  'memory_index', 'memory_index_status',
+]
 
 /**
  * 输出 schema —— 故意**宽松**。
@@ -951,12 +1012,141 @@ export function createTools(deps) {
     }
   }
 
+  // ── memory_index ────────────────────────────────────────────────
+  async function memoryIndex(args = {}) {
+    const projectRaw = typeof args.project === 'string' && args.project.trim() !== ''
+      ? args.project.trim()
+      : (config.projectBasePath ?? process.cwd())
+    const projectDir = normalizeProjectPath(projectRaw, config.projectBasePath ?? process.cwd())
+    const sources = normalizeIndexSources(args.sources)
+    const since = normalizeSince(args.since)
+    const files = Array.isArray(args.files) ? args.files.map((file) => String(file)) : undefined
+    const maxChars = optionalNumber(args.maxChars, {
+      field: 'maxChars', min: 0, max: Number.MAX_SAFE_INTEGER, code: 'MAX_CHARS_RANGE',
+    }) ?? 0
+    const dryRun = args.dryRun === undefined ? true : args.dryRun === true
+    const confirm = args.confirm === true
+    const scopeKey = projectScopeKey(projectDir)
+    const memoryDir = resolve(projectDir, '.workbuddy', 'memory')
+    const existing = store.listRecords({ scopeKeys: [scopeKey] })
+    const built = buildIndexPlan({
+      projectDir, memoryDir, sources, files, since, maxChars, records: existing,
+    })
+    const counts = { new: 0, supersede: 0, skip: 0 }
+    for (const item of built.plan) counts[item.action]++
+
+    const lines = built.plan.map((item) => {
+      const label = item.action === 'new' ? '新增' : item.action === 'supersede' ? '替换' : '跳过'
+      return `[${label}] ${item.relativePath}#${item.heading} (${item.content.length} chars)`
+    })
+    const head = `索引计划 @ ${scopeKey}\n`
+      + `来源: ${sources.join(', ')}；文件: ${built.files.length}；章节: ${built.plan.length}\n`
+      + `计划: ${counts.new} new / ${counts.supersede} supersede / ${counts.skip} skip`
+    const text = `${head}\n\n${lines.join('\n')}`
+      + (built.skippedFiles.length > 0
+        ? `\n\n跳过文件:\n${built.skippedFiles.map((file) => `- ${file.path}: ${file.reason}`).join('\n')}`
+        : '')
+
+    if (dryRun || !confirm) {
+      const reason = dryRun ? 'dryRun=true，未写入' : 'confirm=false，未写入'
+      return {
+        content: [{ type: 'text', text: `${text}\n\n${reason}` }],
+        structuredContent: {
+          ok: true,
+          scope: scopeKey,
+          dryRun,
+          confirmed: confirm,
+          counts,
+          files: built.files.length,
+          sections: built.plan.length,
+          skippedFiles: built.skippedFiles,
+          plan: built.plan.map((item) => ({
+            path: item.relativePath,
+            heading: item.heading,
+            action: item.action,
+            hash: item.hash,
+            contentLength: item.content.length,
+          })),
+        },
+      }
+    }
+
+    const applied = await applyIndexPlan({
+      store: store.raw,
+      scope: scopeKey,
+      plan: built.plan,
+      vector,
+      noVector: !vector?.enabled,
+    })
+    return {
+      content: [{
+        type: 'text',
+        text: `${text}\n\n写入完成: ${applied.counts.new} new / ${applied.counts.supersede} supersede / ${applied.counts.skip} skip`
+          + `\nvector: ${applied.vectors.appended} appended / ${applied.vectors.failed} failed`,
+      }],
+      structuredContent: {
+        ok: applied.vectors.failed === 0,
+        scope: scopeKey,
+        dryRun: false,
+        confirmed: true,
+        counts: applied.counts,
+        files: built.files.length,
+        sections: built.plan.length,
+        vectors: applied.vectors,
+      },
+    }
+  }
+
+  // ── memory_index_status ─────────────────────────────────────────
+  async function memoryIndexStatus(args = {}) {
+    const projectRaw = typeof args.project === 'string' && args.project.trim() !== ''
+      ? args.project.trim()
+      : (config.projectBasePath ?? process.cwd())
+    const projectDir = normalizeProjectPath(projectRaw, config.projectBasePath ?? process.cwd())
+    const sources = normalizeIndexSources(args.sources, ['daily'])
+    const since = normalizeSince(args.since) ?? (args.sources === undefined ? defaultStatusSince() : undefined)
+    const scopeKey = projectScopeKey(projectDir)
+    const memoryDir = resolve(projectDir, '.workbuddy', 'memory')
+    const records = store.listRecords({ scopeKeys: [scopeKey] })
+    const status = inspectIndex({ projectDir, memoryDir, sources, since, records })
+    const text = `索引状态 @ ${scopeKey}\n`
+      + `来源: ${sources.join(', ')}；文件: ${status.files.length}；章节: ${status.plan.length}\n`
+      + `新鲜度: ${status.stale} 个待更新（${status.counts.new} new / ${status.counts.supersede} supersede / ${status.counts.skip} skip）\n`
+      + `现有派生记录: ${status.activeIndexed}；孤儿: ${status.orphans.length}；源缺失: ${status.missingSources.length}；最近源日期: ${status.latestSourceDate ?? '-'}`
+    return {
+      content: [{ type: 'text', text }],
+      structuredContent: {
+        ok: true,
+        scope: scopeKey,
+        stale: status.stale,
+        counts: status.counts,
+        files: status.files.length,
+        sections: status.plan.length,
+        activeIndexed: status.activeIndexed,
+        orphans: status.orphans.map((record) => ({
+          id: record.id, path: record.source?.path, heading: record.source?.heading,
+        })),
+        missingSources: status.missingSources.map((record) => ({
+          id: record.id, path: record.source?.path, heading: record.source?.heading,
+        })),
+        latestSourceDate: status.latestSourceDate,
+        staleItems: status.plan
+          .filter((item) => item.action !== 'skip')
+          .map((item) => ({
+            path: item.relativePath, heading: item.heading, action: item.action, hash: item.hash,
+          })),
+      },
+    }
+  }
+
   return {
     memory_save: memorySave,
     memory_search: memorySearch,
     memory_list: memoryList,
     memory_get: memoryGet,
     memory_forget: memoryForget,
+    memory_index: memoryIndex,
+    memory_index_status: memoryIndexStatus,
   }
 }
 

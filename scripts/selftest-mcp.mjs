@@ -91,8 +91,8 @@ try {
   // ────────────────────────────────────────────────────────────
   const list = await client.listTools()
   const toolNames = list.tools.map((t) => t.name).sort()
-  const EXPECTED = ['memory_forget', 'memory_get', 'memory_list', 'memory_save', 'memory_search']
-  record('tools/list 返回 5 个工具', list.tools.length === 5, `实际 ${list.tools.length} 个:${toolNames.join(', ')}`)
+  const EXPECTED = ['memory_forget', 'memory_get', 'memory_index', 'memory_index_status', 'memory_list', 'memory_save', 'memory_search']
+  record('tools/list 返回 7 个工具', list.tools.length === 7, `实际 ${list.tools.length} 个:${toolNames.join(', ')}`)
   record('工具名与预期一致', JSON.stringify(toolNames) === JSON.stringify(EXPECTED), `实际:${toolNames.join(', ')}`)
 
   const byName = Object.fromEntries(list.tools.map((t) => [t.name, t]))
@@ -101,6 +101,8 @@ try {
   const listSchema = byName.memory_list?.inputSchema
   const getSchema = byName.memory_get?.inputSchema
   const forgetSchema = byName.memory_forget?.inputSchema
+  const indexSchema = byName.memory_index?.inputSchema
+  const indexStatusSchema = byName.memory_index_status?.inputSchema
 
   record('memory_save.content 必填', saveSchema?.required?.includes('content') === true, `required=${JSON.stringify(saveSchema?.required)}`)
   record('memory_save.kind 默认 note + 7 个枚举值',
@@ -135,6 +137,13 @@ try {
     && forgetSchema?.properties?.query !== undefined
     && forgetSchema?.properties?.scope !== undefined,
     `字段:${Object.keys(forgetSchema?.properties ?? {}).join(', ')}`)
+
+  record('memory_index 默认 dryRun=true / confirm=false',
+    indexSchema?.properties?.dryRun?.default === true && indexSchema?.properties?.confirm?.default === false,
+    `dryRun=${indexSchema?.properties?.dryRun?.default} confirm=${indexSchema?.properties?.confirm?.default}`)
+  record('memory_index_status 只读 schema',
+    indexStatusSchema?.properties?.project !== undefined && indexStatusSchema?.properties?.sources !== undefined,
+    `字段:${Object.keys(indexStatusSchema?.properties ?? {}).join(', ')}`)
 
   // ────────────────────────────────────────────────────────────
   section('3. memory_save —— 存一条带 kind/tags/importance 的记忆')

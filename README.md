@@ -32,7 +32,7 @@
 | --- | --- | --- |
 | 形态 | DSH 插件(cordis loader entry) | 独立 MCP 服务(stdio) |
 | 可用宿主 | **仅 DSH** | Trae / WorkBuddy / ZCode / 任何 MCP 客户端,**DSH 不需要开** |
-| 工具数 | 4 个(`memory_get` 定义了但漏注册,见 [上游 #2](https://github.com/RestRegular/dsh-memory/pull/2)) | 5 个(补上 `memory_get`) |
+| 工具数 | 4 个(`memory_get` 定义了但漏注册,见 [上游 #2](https://github.com/RestRegular/dsh-memory/pull/2)) | 7 个(补 `memory_get` + 项目派生索引) |
 | 管理面板 | ✅ 设置页「记忆」 | ❌ 面板仍建议在 DSH 里用 |
 | 自动召回注入 | ✅ 每轮自动注入 | ❌ 由调用方 agent 主动调 `memory_search` |
 | 存储 | JSONL + `.vec` 边车 | **完全相同的格式**,共用同一个 `storeDir` |
@@ -41,7 +41,8 @@
 
 ### 特点
 
-- **五个模型工具**:`memory_save` / `memory_search` / `memory_list` / `memory_get` / `memory_forget`
+- **七个模型工具**:`memory_save` / `memory_search` / `memory_list` / `memory_get` / `memory_forget`
+  / `memory_index` / `memory_index_status`
 - **与 DSH 插件共用同一份数据**(`storeDir`),无需导入导出,两个方向都实时互通
 - **不需要开 DSH** —— IDE 自己拉起进程、自己拉起向量后端
 - **检索算法与上游逐条对齐**,不是"近似实现"
@@ -134,7 +135,7 @@ stdio 型 MCP 不是 Windows 服务,而是 IDE 按需拉起的子进程:
 - [命令行与退出码](#命令行与退出码)
 - [验证你的部署](#验证你的部署)
 - [环境变量](#环境变量)
-- [五个工具](#五个工具)
+- [七个工具](#七个工具)
 - [Trae / WorkBuddy / ZCode 配置](#trae--workbuddy--zcode-配置)
 - [与 DSH 共存的设计](#与-dsh-共存的设计)
 - [scope 语义(与 DSH 的差异)](#scope-语义与-dsh-的差异)
@@ -387,7 +388,7 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 > 换机器时三选一:设 `DSH_MEMORY_EMBED_EXE` + `DSH_MEMORY_EMBED_MODEL`;或用
 > `DSH_MEMORY_EMBED_ENDPOINT` 指向已有的 embedding 服务;或直接 `DSH_MEMORY_VECTOR=off` 关掉向量。
 
-## 五个工具
+## 七个工具
 
 所有工具都返回 `{ content: [{ type: 'text', text }], structuredContent: {...} }`,
 文本是给人(和模型)看的友好渲染,`structuredContent` 是给程序用的结构化数据。
@@ -473,6 +474,31 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 
 删除记忆。`id` 与 `query` **恰好二选一**。
 
+### `memory_index`
+
+把项目 `.workbuddy/memory` 的日报（或显式指定的 detail/rules）按 Markdown 二级章节建成
+`project:<项目路径>` 的派生索引。**绝不写 `global`**。
+
+| 参数 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `project` | string | 当前 `--project` | 项目根目录 |
+| `sources` | string[] | `["daily"]` | `daily` / `detail` / `rules`；detail 自动跳过 `00-done-log.md` |
+| `files` | string[] | — | 只索引指定文件 |
+| `since` | string | — | 只索引日期 >= `YYYY-MM-DD` 的日报 |
+| `dryRun` | boolean | `true` | 默认只返回计划 |
+| `confirm` | boolean | `false` | 写入必须同时给 `dryRun=false` + `confirm=true` |
+| `maxChars` | number | `0` | 单条正文上限，0 = 不截断 |
+
+每条记录带 `来源:<相对路径>#<标题>` + `hash:<sha1>`。同一来源 hash 不变则跳过；
+变化则新建一条并用**完整旧 UUID** `supersedes` 旧记录。`MEMORY.md` / `STATE.md` /
+`00-done-log.md` / `secrets.local.md` 不进入索引。
+
+### `memory_index_status`
+
+只读检查项目索引新鲜度：未索引/待替换章节、孤儿记录、源文件缺失、最近源日期。
+默认只看最近 3 天日报，避免把历史未全量索引的日报误报成每次收尾的故障；
+需要全量检查时显式传 `sources` 或 `since`。
+
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `id` | string | 二选一 | 精确 id(或 8 位前缀)。跨作用域唯一,`scope` 参数不适用。 |
@@ -501,6 +527,8 @@ dsh-memory-mcp 0.1.0 —— 把 DSH 的长期记忆库暴露成独立 MCP 服务
 | `memory_list` | `{ ok, count, scopes, records: [...] }` |
 | `memory_get` | `{ ok, count, records: [{ ..., content }], missing: [...] }` |
 | `memory_forget` | `{ ok, deleted, ids: [...] }` |
+| `memory_index` | `{ ok, scope, dryRun, confirmed, counts, files, sections, plan }` |
+| `memory_index_status` | `{ ok, scope, stale, counts, activeIndexed, orphans, missingSources, latestSourceDate }` |
 
 > 🔴 **`memory_search` / `memory_list` 不返回正文**,只在 `content[0].text` 里给**摘要**
 > (前 160 字符,空白折叠;超长加 `…`),并用 `contentLength` 告诉你原文多长。
@@ -906,6 +934,8 @@ node scripts/selftest-mcp.mjs          # 完整 MCP 协议端到端(真起 stdio
 node scripts/selftest.mjs              # 存储层并发(真 fork 多进程)
 node scripts/selftest-tools.mjs        # 工具层:参数校验 / scope 决策 / 渲染(内存版假 store)
 node scripts/selftest-protocol.mjs     # 协议层:握手 / tools/list / tools/call(内存版假 store)
+node scripts/selftest-index-tool.mjs   # memory_index / memory_index_status 专项(临时目录 + 假 store)
+node scripts/selftest-index-workbuddy.mjs # CLI + 共享索引模块(临时目录)
 node scripts/selftest-vector.mjs       # 向量后端:配置 / 探活 / 熔断 / 生命周期
 node scripts/selftest-vector-e2e.mjs   # 向量端到端:写 .vec 边车 + 语义召回
 
@@ -918,10 +948,12 @@ node scripts/acceptance-standalone.mjs # 不开 DSH 的独立运行验证(纯词
 | 脚本 | 覆盖 | 检查项 | 碰真实 store? |
 | --- | --- | --- | --- |
 | `selftest-cli.mjs` | CLI 契约:`--help`/`--version` 的零副作用、未知参数 exit 2、启动失败诊断无裸栈、`parseArgs`/`resolveConfig` 纯函数 | **115**(POSIX 114,有一条 Windows 专有断言) | 否 |
-| `selftest-mcp.mjs` | 真实 stdio 握手、5 个工具的 schema、保存、检索、幂等、列表/按前缀取回、删除后不再召回、错误码、向量开关对比、落盘检查、stderr 日志 | **40** | 否 |
+| `selftest-mcp.mjs` | 真实 stdio 握手、7 个工具的 schema、保存、检索、幂等、列表/按前缀取回、删除后不再召回、错误码、向量开关对比、落盘检查、stderr 日志 | **42** | 否 |
 | `selftest.mjs` | 单进程语义、**4 进程 × 20 条真并发**、外部追加不被抹除、跨进程锁(超时/陈旧锁/粒度)、`.vec` 边车、别名映射 | **57** | 否 |
-| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、上游 0.26 对齐(supersedes 前缀解析 / state TTL / 退役与过期过滤 / `custom:` 前缀)、schema 自检 | **84**(POSIX 83,盘符大小写折叠是 Windows 专有语义) | 否 |
+| `selftest-tools.mjs` | 路径归一化、scope 决策、全部校验错误码、检索渲染、幂等、别名、自定义作用域、上游 0.26 对齐、索引工具 schema 自检 | **88**(POSIX 87,盘符大小写折叠是 Windows 专有语义) | 否 |
 | `selftest-protocol.mjs` | 握手、tools/list、tools/call 正常/错误路径、stdout 纯净性 | **18** | 否 |
+| `selftest-index-tool.mjs` | `memory_index` 默认 dry-run、confirm 门禁、只写 project、来源/hash、幂等、完整 UUID supersedes、status stale/孤儿、越界文件拒绝 | **25** | 否 |
+| `selftest-index-workbuddy.mjs` | CLI 参数、章节切分、脱敏、dry-run 零落盘、幂等、替换、daily 只收日期文件、status 新鲜度 | **34** | 否 |
 | `selftest-vector.mjs` | 配置解析、探活、复用不 spawn、维度、L2 归一化、熔断退避、与已存向量的空间兼容性 | **27** | **只读** |
 | `selftest-vector-e2e.mjs` | 写 `.vec` 边车 → 读回 → 不同措辞的语义召回 | **6** | 否 |
 | `acceptance-real.mjs` | 对**你指定的** storeDir 跑完整协议:写入(**`path` ⇒ `project:` 作用域,并断言不是 `global`**)→ 磁盘可见 → 跨作用域读回 → 幂等 → 按前缀取回 → 删除 → 尝试确认仍能读到 DSH 既有记忆 | **18** | 需 `DSH_MEMORY_REAL_STORE`(只删自己造的) |

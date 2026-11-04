@@ -106,9 +106,12 @@ check('server 声明 tools 能力', Boolean(client.getServerCapabilities()?.tool
 
 console.log('\n[2] tools/list')
 const list = await client.listTools()
-check('5 个工具', list.tools.length === 5, `${list.tools.length} 个`)
+check('7 个工具', list.tools.length === 7, `${list.tools.length} 个`)
 check('名字正确', JSON.stringify(list.tools.map(t => t.name).sort())
-  === JSON.stringify(['memory_forget', 'memory_get', 'memory_list', 'memory_save', 'memory_search']),
+  === JSON.stringify([
+    'memory_forget', 'memory_get', 'memory_index', 'memory_index_status',
+    'memory_list', 'memory_save', 'memory_search',
+  ]),
   list.tools.map(t => t.name).join(','))
 check('每个工具都有 inputSchema', list.tools.every(t => t.inputSchema?.type === 'object'))
 check('每个工具都有 outputSchema', list.tools.every(t => t.outputSchema !== undefined))

@@ -283,7 +283,8 @@ check('自定义作用域能检索到', r.structuredContent.count === 1, `count=
 
 // ── schema 自检 ────────────────────────────────────────────────
 console.log('\n[9] schema 自检')
-check('5 个工具', TOOL_NAMES.length === 5, TOOL_NAMES.join(','))
+check('7 个工具', TOOL_NAMES.length === 7, TOOL_NAMES.join(','))
+check('包含项目索引工具', TOOL_NAMES.includes('memory_index') && TOOL_NAMES.includes('memory_index_status'))
 check('memory_save.content 必填', TOOL_SCHEMAS.memory_save.required.includes('content'))
 check('memory_save.kind 默认 note', TOOL_SCHEMAS.memory_save.properties.kind.default === 'note')
 check('memory_save.kind 7 个枚举', TOOL_SCHEMAS.memory_save.properties.kind.enum.length === 7)
@@ -302,6 +303,10 @@ check('memory_get.ids 必填 + maxItems 50',
   TOOL_SCHEMAS.memory_get.required.includes('ids') && TOOL_SCHEMAS.memory_get.properties.ids.maxItems === 50)
 check('memory_forget 同时有 id 与 query', TOOL_SCHEMAS.memory_forget.properties.id !== undefined
   && TOOL_SCHEMAS.memory_forget.properties.query !== undefined)
+check('memory_index 默认 dryRun=true', TOOL_SCHEMAS.memory_index.properties.dryRun.default === true)
+check('memory_index 写入必须 confirm', TOOL_SCHEMAS.memory_index.properties.confirm.default === false)
+check('memory_index.sources 枚举正确',
+  JSON.stringify(TOOL_SCHEMAS.memory_index.properties.sources.items.enum) === JSON.stringify(['daily', 'detail', 'rules']))
 check('所有 schema 都不带 strict additionalProperties',
   Object.values(TOOL_SCHEMAS).every((s) => s.additionalProperties === undefined))
 

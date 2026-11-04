@@ -1,6 +1,6 @@
 # dsh-memory-mcp
 
-> 把 `@restregular/dsh-memory` 的长期记忆库(JSONL + 本地 `.vec` 向量边车)抽成独立的 **stdio MCP 服务**,让 DSH / Trae / WorkBuddy / ZCode 等任意 MCP 客户端读写同一个 `storeDir`。五个工具:`memory_save` / `memory_search` / `memory_list` / `memory_get` / `memory_forget`。纯文件存储,无数据库、无独立服务进程。
+> 把 `@restregular/dsh-memory` 的长期记忆库(JSONL + 本地 `.vec` 向量边车)抽成独立的 **stdio MCP 服务**,让 DSH / Trae / WorkBuddy / ZCode 等任意 MCP 客户端读写同一个 `storeDir`。七个工具:`memory_save` / `memory_search` / `memory_list` / `memory_get` / `memory_forget` / `memory_index` / `memory_index_status`。纯文件存储,无数据库、无独立服务进程。
 
 仓库:https://github.com/tearslee/dsh-memory-mcp(公开,MIT 许可)
 
@@ -21,12 +21,14 @@
 
 ## MCP tools
 
-- [五个工具](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#五个工具): 每个工具的参数表、默认值与输出示例。
+- [七个工具](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#七个工具): 每个工具的参数表、默认值与输出示例。
 - [memory_save](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_save): 省略 `scope` 时写 `global`(跨 IDE 共享);`DSH_MEMORY_SCOPE_ALL=true` 改为写当前 `project`。
 - [memory_search](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_search): `hybrid = max(词法 IDF, 余弦)`,不是加权求和;`topK` 默认 5、范围 1~20。
 - [memory_list](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_list): 按 `updatedAt` 降序;`limit` 默认 50、范围 1~200。
 - [memory_get](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_get): 按完整 id 或 8 位前缀取回,最多 50 个。上游定义了但漏注册,本项目补上。
 - [memory_forget](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_forget): `id` 与 `query` 恰好二选一;用 `query` 且省略 scope 时**只作用于当前项目**,不会误删 `global`。
+- [memory_index](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_index): 把 `.workbuddy/memory` 按 `##` 章节派生到 `project:<路径>`;带 `来源+hash`,默认 `dryRun=true`,写入必须 `confirm=true`,永不写 `global`。
+- [memory_index_status](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#memory_index_status): 只读检查 stale / 孤儿 / 源缺失;默认最近 3 天,避免历史日报噪声。
 - [结构化输出](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#结构化输出): `structuredContent` 字段名与上游对齐(记录数组叫 **`records`**,不是 `results`)。
 - [src/tools.js](https://github.com/tearslee/dsh-memory-mcp/blob/main/src/tools.js): schema、描述、校验与全部错误码的实现。不 import MCP SDK,可单测。
 
@@ -43,9 +45,10 @@
 - [自测](https://github.com/tearslee/dsh-memory-mcp/blob/main/README.md#自测): 全部脚本的用途、检查项数、耗时与「是否碰真实 store」对照表。默认 `npm test` 不碰真实库。
 - [.github/workflows/ci.yml](https://github.com/tearslee/dsh-memory-mcp/blob/main/.github/workflows/ci.yml): CI 在 **ubuntu-latest + windows-latest × Node 20/22/24** 上跑 `npm ci` + `npm test` + tools/protocol 两层。刻意不跑 `selftest:vector*`(无 llama-server)与 `acceptance-*`(需真实库)。`package-lock.json` 已提交,构建可复现。
 - [scripts/selftest-cli.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-cli.mjs): CLI 契约 **115 项**(POSIX 114:有一条是 Windows 专有的"盘符不存在"断言)。`--help`/`--version`/未知参数/退出码/启动失败诊断/配置解析。零副作用:缺依赖场景是把 `src/` 复制到 tmpdir 再跑,不碰真实 `node_modules`。见 [AGENTS.md 的测试地图](https://github.com/tearslee/dsh-memory-mcp/blob/main/AGENTS.md)。
-- [scripts/selftest-mcp.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-mcp.mjs): 主自测。用 SDK `Client` + `StdioClientTransport` 起自己,真走 `initialize → tools/list → tools/call`,共 40 项,约 1 秒,只用 tmpdir。
+- [scripts/selftest-mcp.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-mcp.mjs): 主自测。用 SDK `Client` + `StdioClientTransport` 起自己,真走 `initialize → tools/list → tools/call`,共 42 项,只用 tmpdir。
 - [scripts/selftest.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest.mjs): 多进程并发自测(4 进程 × 20 条)。开头有 `assertNotRealStore()` 硬守卫,命中真实路径直接中止,共 55 项。
 - [scripts/selftest-tools.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-tools.mjs) / [selftest-protocol.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-protocol.mjs): 用内存假 store 覆盖参数校验、scope 决策与协议层/ stdout 纯净性。
+- [scripts/selftest-index-tool.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-index-tool.mjs) / [selftest-index-workbuddy.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-index-workbuddy.mjs): 项目索引专项,锁住 dry-run/confirm 门禁、只写 project、来源+hash、完整 UUID supersedes、status 新鲜度与 daily 只收日期文件。
 - [scripts/selftest-vector.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/selftest-vector.mjs): 配置解析、探活、熔断退避。只读,可安全跑;若真实 store 的 `global.vec` 存在会**读**它比对向量空间。
 - [scripts/acceptance-real.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-real.mjs): ⚠️ **会写 store**,结束后按 id 删除自己造的记录。目标库由 `DSH_MEMORY_REAL_STORE` 指定,**未设置时打印提示并 `exit(0)` 跳过**(不猜路径、也不回退到任何机器路径)。写入走 `memory_save` 的 `path` 参数并**断言** scope 为 `project:<测试目录>`,不是 `global`。
 - [scripts/acceptance-standalone.mjs](https://github.com/tearslee/dsh-memory-mcp/blob/main/scripts/acceptance-standalone.mjs): ⚠️ 同样需要一个 `DSH_MEMORY_REAL_STORE`(未设则跳过)。入口从脚本自身位置推导(`scripts/..`),不写死;向量后端读 `DSH_MEMORY_EMBED_EXE`/`DSH_MEMORY_EMBED_MODEL`,未配时相关小节标「跳过」。端口探活用 `node:net` 的 `connect()` + 原生 `fetch()`,跨平台,不依赖 `netstat` / `curl`。
